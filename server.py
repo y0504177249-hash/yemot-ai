@@ -33,6 +33,7 @@ def log_every_request():
 def ping():
     return "ok"
 
+
 # היסטוריית שיחה (טקסט בלבד) לפי מזהה שיחה
 histories = {}
 
