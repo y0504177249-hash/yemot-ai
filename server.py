@@ -22,6 +22,17 @@ SYSTEM_PROMPT = (
 app = Flask(__name__)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+
+@app.before_request
+def log_every_request():
+    # רושם כל בקשה שמגיעה לשרת, כדי לראות אם ימות המשיח פונים אליו
+    print("REQUEST:", request.method, request.full_path, dict(request.values), flush=True)
+
+
+@app.route("/ping")
+def ping():
+    return "ok"
+
 # היסטוריית שיחה (טקסט בלבד) לפי מזהה שיחה
 histories = {}
 
