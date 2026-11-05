@@ -10,6 +10,10 @@ YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# תיקייה לשמירת ההקלטות בימות המשיח (התיקייה 8 כבר קיימת)
+RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
+# מצב בדיקה: אם מוגדר TEST_MODE=1 השרת רק מקריא משפט פשוט, בלי הקלטה
+TEST_MODE = os.environ.get("TEST_MODE") == "1"
 
 SYSTEM_PROMPT = (
     "אתה עוזר קולי בשיחת טלפון. המשתמש שולח הקלטה בעברית. "
@@ -32,7 +36,6 @@ def log_every_request():
 @app.route("/ping")
 def ping():
     return "ok"
-
 
 # היסטוריית שיחה (טקסט בלבד) לפי מזהה שיחה
 histories = {}
@@ -84,7 +87,7 @@ def ask_gemini(call_id, audio_bytes):
 
 def read_command(prompt_text):
     # מקריא טקסט ואז מקליט את השאלה הבאה. ההקלטה נעצרת אוטומטית בשקט.
-    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,/ai_questions,q,no,yes,no"
+    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{RECORD_PATH},q,no,yes,no"
 
 
 @app.route("/ivr", methods=["GET", "POST"])
@@ -95,6 +98,9 @@ def ivr():
     if p.get("hangup") == "yes":
         histories.pop(call_id, None)
         return Response("", mimetype="text/plain")
+
+    if TEST_MODE:
+        return Response("id_list_message=t-שלום זו בדיקה של המערכת", mimetype="text/plain")
 
     recorded = p.get("question")
 
