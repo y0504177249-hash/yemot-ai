@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import threading
 import requests
 from flask import Flask, request, Response
 from google import genai
@@ -15,6 +16,10 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
 # מצב בדיקה: אם מוגדר TEST_MODE=1 השרת רק מקריא משפט פשוט, בלי הקלטה
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
+# מנגינת המתנה: שם קובץ מנגינה שהועלה לימות המשיח (למשל /8/music). ריק = בלי מנגינה
+MUSIC_FILE = os.environ.get("MUSIC_FILE", "").strip()
+# השלוחה שאליה חוזרים בזמן ההמתנה
+IVR_FOLDER = os.environ.get("IVR_FOLDER", "/8")
 
 SYSTEM_PROMPT = (
     "אתה עוזר קולי בשיחת טלפון. המשתמש שולח הקלטה בעברית. "
@@ -40,6 +45,27 @@ def ping():
 
 # היסטוריית שיחה (טקסט בלבד) לפי מזהה שיחה
 histories = {}
+# עבודות שרצות ברקע בזמן שמושמעת מנגינת המתנה: call_id -> {"done": Event, "answer": str}
+jobs = {}
+
+
+def run_job(call_id, recorded):
+    job = jobs[call_id]
+    try:
+        audio = download_recording(recorded)
+        job["answer"] = ask_gemini(call_id, audio)
+    except Exception as e:
+        print("error:", e, flush=True)
+        job["answer"] = "אירעה שגיאה נסה שוב"
+    finally:
+        job["done"].set()
+
+
+def hold_response():
+    return Response(
+        f"id_list_message=f-{MUSIC_FILE}&go_to_folder={IVR_FOLDER}",
+        mimetype="text/plain",
+    )
 
 
 def clean_for_tts(text):
@@ -103,12 +129,29 @@ def ivr():
 
     if p.get("hangup") == "yes":
         histories.pop(call_id, None)
+        jobs.pop(call_id, None)
         return Response("", mimetype="text/plain")
 
     if TEST_MODE:
         return Response("id_list_message=t-שלום זו בדיקה של המערכת", mimetype="text/plain")
 
     recorded = p.get("question")
+
+    # מצב מנגינת המתנה (פעיל רק אם הוגדר MUSIC_FILE)
+    if MUSIC_FILE:
+        job = jobs.get(call_id)
+        if job is not None:
+            if job["done"].wait(timeout=1.5):
+                jobs.pop(call_id, None)
+                return Response(
+                    read_command(job["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית", call_id),
+                    mimetype="text/plain",
+                )
+            return hold_response()
+        if recorded:
+            jobs[call_id] = {"done": threading.Event(), "answer": ""}
+            threading.Thread(target=run_job, args=(call_id, recorded), daemon=True).start()
+            return hold_response()
 
     if not recorded:
         return Response(
