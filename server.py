@@ -22,6 +22,28 @@ MUSIC_FILE = os.environ.get("MUSIC_FILE", "").strip()
 # מצב בדיקה: אם TEST_MODE=1 השרת רק מקריא משפט פשוט
 TEST_MODE = os.environ.get("TEST_MODE") == "1"
 
+# ---- שליחת מיילים (Brevo). אם לא מוגדר, היכולת כבויה ----
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "").strip()
+MAIL_FROM = os.environ.get("MAIL_FROM", "").strip()  # כתובת שנוספה ואומתה ב-Brevo
+# אנשי קשר מותרים כ-JSON, למשל {"אני": "me@gmail.com", "אבא": "dad@gmail.com"}
+try:
+    MAIL_CONTACTS = json.loads(os.environ.get("MAIL_CONTACTS", "{}"))
+except Exception:
+    MAIL_CONTACTS = {}
+# מספרי טלפון שמורשים לשלוח מיילים (מופרדים בפסיק). ריק = אף אחד
+ALLOWED_PHONES = [x.strip() for x in os.environ.get("ALLOWED_PHONES", "").split(",") if x.strip()]
+EMAIL_ENABLED = bool(BREVO_API_KEY and MAIL_FROM and MAIL_CONTACTS)
+
+EMAIL_PROMPT = (
+    " אפשר לשלוח מייל. אנשי הקשר המותרים: " + ", ".join(MAIL_CONTACTS.keys()) + ". "
+    "בפורמט ה-JSON הוסף שדה send_email, ברירת מחדל null. "
+    "כשהמשתמש מבקש לשלוח מייל, אל תשלח מיד: ב-answer אמור למי, מה הנושא ומה התוכן בקצרה, "
+    "ושאל אם לשלוח, ובקש שיגיד כן או לא, ושדה send_email נשאר null. "
+    "רק אם בהקלטה הנוכחית המשתמש אישר במפורש (כן), מלא "
+    "send_email={\"to\": \"שם איש קשר מהרשימה בדיוק\", \"subject\": \"נושא\", \"body\": \"תוכן\"} "
+    "עם אותם פרטים שאושרו. אל תשלח לשם שאינו ברשימה."
+)
+
 SYSTEM_PROMPT = (
     "אתה עוזר קולי בשיחת טלפון. המשתמש שולח הקלטה בעברית. "
     "החזר JSON בלבד בפורמט: {\"heard\": \"מה שהמשתמש אמר\", \"answer\": \"התשובה שלך\"}. "
@@ -29,6 +51,9 @@ SYSTEM_PROMPT = (
     "בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים. "
     "אם ההקלטה ריקה או לא ברורה, השאר heard ריק וב-answer בקש לחזור על השאלה."
 )
+
+if EMAIL_ENABLED:
+    SYSTEM_PROMPT += EMAIL_PROMPT
 
 app = Flask(__name__)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
@@ -67,6 +92,24 @@ def wait_command():
     if MUSIC_FILE:
         return f"id_list_message=f-{MUSIC_FILE}&go_to_folder={EXTENSION_PATH}"
     return f"id_list_message=t-נא להמתין&go_to_folder={EXTENSION_PATH}"
+
+
+def send_email(to_name, subject, body):
+    to_addr = MAIL_CONTACTS.get(to_name)
+    if not to_addr:
+        raise ValueError(f"contact not allowed: {to_name}")
+    r = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": BREVO_API_KEY, "content-type": "application/json"},
+        json={
+            "sender": {"email": MAIL_FROM, "name": "העוזר החכם"},
+            "to": [{"email": to_addr}],
+            "subject": (subject or "הודעה")[:200],
+            "textContent": (body or "")[:5000],
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
 
 
 def download_recording(path):
@@ -147,22 +190,35 @@ def ask_gemini(call_id, audio_bytes):
     data = json.loads(res.text)
     heard = (data.get("heard") or "").strip()
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
+    email_action = data.get("send_email") if EMAIL_ENABLED else None
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
         history.append(types.Content(role="model", parts=[types.Part(text=answer)]))
         history[:] = history[-12:]
-    return answer
+    return answer, email_action
 
 
-def worker(call_id, recorded):
+def worker(call_id, recorded, phone=""):
     t0 = time.time()
     try:
         audio = download_recording(recorded)
         print(f"timing: download {time.time() - t0:.1f}s, {len(audio)} bytes", flush=True)
         t1 = time.time()
-        answer = ask_gemini(call_id, audio)
+        answer, action = ask_gemini(call_id, audio)
         print(f"timing: gemini {time.time() - t1:.1f}s", flush=True)
+        if action and isinstance(action, dict):
+            if phone not in ALLOWED_PHONES:
+                print("email blocked: phone not allowed", flush=True)
+                answer = "אין לך הרשאה לשלוח מיילים"
+            else:
+                try:
+                    send_email(action.get("to"), action.get("subject"), action.get("body"))
+                    print("email sent to", action.get("to"), flush=True)
+                    answer = "המייל נשלח"
+                except Exception as e:
+                    print("email error:", e, flush=True)
+                    answer = "לא הצלחתי לשלוח את המייל"
     except Exception as e:
         print("error:", e, flush=True)
         answer = "אירעה שגיאה נסה שוב"
@@ -209,7 +265,7 @@ def ivr():
             st["last"] = recorded
             st["status"] = "processing"
             st["started"] = time.time()
-            threading.Thread(target=worker, args=(call_id, recorded), daemon=True).start()
+            threading.Thread(target=worker, args=(call_id, recorded, p.get("ApiPhone", "")), daemon=True).start()
             return Response(wait_command(), mimetype="text/plain")
 
         # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-45 שניות
