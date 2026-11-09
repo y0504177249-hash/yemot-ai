@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import threading
 import requests
 from flask import Flask, request, Response
@@ -11,15 +12,15 @@ from google.genai import types
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-# תיקייה לשמירת ההקלטות בימות המשיח (התיקייה 8 כבר קיימת)
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+# תיקייה לשמירת ההקלטות בימות המשיח
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
-# מצב בדיקה: אם מוגדר TEST_MODE=1 השרת רק מקריא משפט פשוט, בלי הקלטה
-TEST_MODE = os.environ.get("TEST_MODE") == "1"
-# מנגינת המתנה: שם קובץ מנגינה שהועלה לימות המשיח (למשל /8/music). ריק = בלי מנגינה
+# שלוחה שאליה חוזרים בזמן ההמתנה (השלוחה הזו)
+EXTENSION_PATH = os.environ.get("EXTENSION_PATH", "/8")
+# קובץ מנגינת המתנה בימות המשיח, למשל /8/music (בלי סיומת). אם ריק, מושמעת הודעת "נא להמתין"
 MUSIC_FILE = os.environ.get("MUSIC_FILE", "").strip()
-# השלוחה שאליה חוזרים בזמן ההמתנה
-IVR_FOLDER = os.environ.get("IVR_FOLDER", "/8")
+# מצב בדיקה: אם TEST_MODE=1 השרת רק מקריא משפט פשוט
+TEST_MODE = os.environ.get("TEST_MODE") == "1"
 
 SYSTEM_PROMPT = (
     "אתה עוזר קולי בשיחת טלפון. המשתמש שולח הקלטה בעברית. "
@@ -35,43 +36,37 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 @app.before_request
 def log_every_request():
-    # רושם כל בקשה שמגיעה לשרת, כדי לראות אם ימות המשיח פונים אליו
-    print("REQUEST:", request.method, request.full_path, dict(request.values), flush=True)
+    print("REQUEST:", request.method, request.path, flush=True)
 
 
 @app.route("/ping")
 def ping():
     return "ok"
 
-# היסטוריית שיחה (טקסט בלבד) לפי מזהה שיחה
+
+# היסטוריית שיחה (טקסט בלבד) ומצב עיבוד, לפי מזהה שיחה
 histories = {}
-# עבודות שרצות ברקע בזמן שמושמעת מנגינת המתנה: call_id -> {"done": Event, "answer": str}
-jobs = {}
-
-
-def run_job(call_id, recorded):
-    job = jobs[call_id]
-    try:
-        audio = download_recording(recorded)
-        job["answer"] = ask_gemini(call_id, audio)
-    except Exception as e:
-        print("error:", e, flush=True)
-        job["answer"] = "אירעה שגיאה נסה שוב"
-    finally:
-        job["done"].set()
-
-
-def hold_response():
-    return Response(
-        f"id_list_message=f-{MUSIC_FILE}&go_to_folder={IVR_FOLDER}",
-        mimetype="text/plain",
-    )
+calls = {}  # call_id -> {"turn": int, "last": str, "status": "idle|processing", "answer": str, "t": float}
+lock = threading.Lock()
 
 
 def clean_for_tts(text):
-    # משאירים רק אותיות, ספרות ורווחים. סימנים מיוחדים עלולים לשבש את הפקודה בימות המשיח
-    text = re.sub(r"[^0-9A-Za-z\u0590-\u05FF ]", " ", text)
+    # משאירים רק אותיות, ספרות ורווחים. סימנים מיוחדים עלולים לשבש את הפקודה
+    text = re.sub(r"[^0-9A-Za-z֐-׿ ]", " ", text)
     return " ".join(text.split())[:700]
+
+
+def read_command(prompt_text, call_id, turn):
+    # מקריא טקסט ואז מקליט. ההקלטה מסתיימת בהקשת סולמית (#). שם הקובץ שונה בכל סבב.
+    fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(turn)
+    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
+
+
+def wait_command():
+    # מנגינת המתנה (או הודעה) ואז חזרה לשלוחה, שתבדוק אם התשובה מוכנה
+    if MUSIC_FILE:
+        return f"id_list_message=f-{MUSIC_FILE}&go_to_folder={EXTENSION_PATH}"
+    return f"id_list_message=t-נא להמתין&go_to_folder={EXTENSION_PATH}"
 
 
 def download_recording(path):
@@ -88,6 +83,58 @@ def download_recording(path):
     return r.content
 
 
+def candidate_models():
+    # המודל שהוגדר ואחריו עד שני מודלי flash זמינים נוספים, למקרה של עומס או הסרה
+    names = [MODEL]
+    try:
+        for m in client.models.list():
+            n = (m.name or "").replace("models/", "")
+            actions = getattr(m, "supported_actions", None) or []
+            if "flash" in n and "generateContent" in actions and n not in names:
+                if not any(x in n for x in ("image", "tts", "live", "audio", "preview-tts")):
+                    names.append(n)
+            if len(names) >= 3:
+                break
+    except Exception as e:
+        print("list models failed:", e, flush=True)
+    return names
+
+
+def generate(contents):
+    last_err = None
+    for name in [MODEL]:
+        for attempt in range(3):
+            try:
+                return client.models.generate_content(
+                    model=name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        max_output_tokens=400,
+                    ),
+                )
+            except Exception as e:
+                last_err = e
+                print(f"gemini {name} attempt {attempt + 1} failed: {e}", flush=True)
+                time.sleep(1.5)
+    for name in candidate_models()[1:]:
+        try:
+            return client.models.generate_content(
+                model=name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    max_output_tokens=400,
+                ),
+            )
+        except Exception as e:
+            last_err = e
+            print(f"gemini fallback {name} failed: {e}", flush=True)
+    raise last_err
+
+
 def ask_gemini(call_id, audio_bytes):
     history = histories.setdefault(call_id, [])
     contents = list(history) + [
@@ -96,18 +143,10 @@ def ask_gemini(call_id, audio_bytes):
             parts=[types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")],
         )
     ]
-    res = client.models.generate_content(
-        model=MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            max_output_tokens=400,
-        ),
-    )
+    res = generate(contents)
     data = json.loads(res.text)
     heard = (data.get("heard") or "").strip()
-    answer = (data.get("answer") or "").strip() or "לא הבנתי, נסה שוב"
+    answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
@@ -116,10 +155,25 @@ def ask_gemini(call_id, audio_bytes):
     return answer
 
 
-def read_command(prompt_text, call_id="x"):
-    # מקריא טקסט ואז מקליט את השאלה הבאה. ההקלטה מסתיימת בהקשת סולמית (#)
-    fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
-    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
+def worker(call_id, recorded):
+    try:
+        audio = download_recording(recorded)
+        answer = ask_gemini(call_id, audio)
+    except Exception as e:
+        print("error:", e, flush=True)
+        answer = "אירעה שגיאה נסה שוב"
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["answer"] = answer
+            st["status"] = "done"
+
+
+def cleanup_old():
+    now = time.time()
+    for cid in [c for c, s in calls.items() if now - s["t"] > 3600]:
+        calls.pop(cid, None)
+        histories.pop(cid, None)
 
 
 @app.route("/ivr", methods=["GET", "POST"])
@@ -128,44 +182,49 @@ def ivr():
     call_id = p.get("ApiCallId", "unknown")
 
     if p.get("hangup") == "yes":
+        with lock:
+            calls.pop(call_id, None)
         histories.pop(call_id, None)
-        jobs.pop(call_id, None)
         return Response("", mimetype="text/plain")
 
     if TEST_MODE:
         return Response("id_list_message=t-שלום זו בדיקה של המערכת", mimetype="text/plain")
 
-    recorded = p.get("question")
+    recorded_all = p.getlist("question")
+    recorded = recorded_all[-1] if recorded_all else None
 
-    # מצב מנגינת המתנה (פעיל רק אם הוגדר MUSIC_FILE)
-    if MUSIC_FILE:
-        job = jobs.get(call_id)
-        if job is not None:
-            if job["done"].wait(timeout=1.5):
-                jobs.pop(call_id, None)
-                return Response(
-                    read_command(job["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית", call_id),
-                    mimetype="text/plain",
-                )
-            return hold_response()
-        if recorded:
-            jobs[call_id] = {"done": threading.Event(), "answer": ""}
-            threading.Thread(target=run_job, args=(call_id, recorded), daemon=True).start()
-            return hold_response()
+    with lock:
+        cleanup_old()
+        st = calls.setdefault(
+            call_id, {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time()}
+        )
+        st["t"] = time.time()
 
-    if not recorded:
+        # הקלטה חדשה שעדיין לא טופלה: מתחילים עיבוד ברקע ומשמיעים המתנה
+        if recorded and recorded != st["last"]:
+            st["last"] = recorded
+            st["status"] = "processing"
+            threading.Thread(target=worker, args=(call_id, recorded), daemon=True).start()
+            return Response(wait_command(), mimetype="text/plain")
+
+        # עיבוד בעיצומו: ממשיכים להמתין
+        if st["status"] == "processing":
+            return Response(wait_command(), mimetype="text/plain")
+
+        # התשובה מוכנה: מקריאים ומקליטים שאלה הבאה
+        if st["status"] == "done":
+            st["status"] = "idle"
+            st["turn"] += 1
+            text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
+            return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
+
+        # כניסה ראשונה לשלוחה
         return Response(
-            read_command("שלום אני העוזר החכם שאל אותי כל שאלה ובסיום השאלה הקש סולמית", call_id),
+            read_command(
+                "שלום אני העוזר החכם שאל אותי כל שאלה ובסיום השאלה הקש סולמית", call_id, st["turn"]
+            ),
             mimetype="text/plain",
         )
-
-    try:
-        audio = download_recording(recorded)
-        answer = ask_gemini(call_id, audio)
-        return Response(read_command(answer + " לשאלה נוספת דבר ובסיום הקש סולמית", call_id), mimetype="text/plain")
-    except Exception as e:
-        print("error:", e)
-        return Response(read_command("אירעה שגיאה נסה שוב בסיום הקש סולמית", call_id), mimetype="text/plain")
 
 
 if __name__ == "__main__":
