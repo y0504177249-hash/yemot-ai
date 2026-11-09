@@ -52,6 +52,16 @@ SYSTEM_PROMPT = (
     "אם ההקלטה ריקה או לא ברורה, השאר heard ריק וב-answer בקש לחזור על השאלה."
 )
 
+LOOKUP_PROMPT = (
+    " אפשר לחפש מידע. בפורמט ה-JSON הוסף שדה lookup, ברירת מחדל null. "
+    "לשאלות על ידע כללי, אנשים, מקומות, מושגים והיסטוריה הגדר "
+    "lookup={\"type\": \"wikipedia\", \"query\": \"שם הערך\"}. "
+    "לחדשות, מזג אוויר, מחירים, תוצאות ספורט ושאלות עדכניות הגדר "
+    "lookup={\"type\": \"web\", \"query\": \"מה לחפש\"}. "
+    "כשמגדירים lookup השאר answer ריק. אל תחפש לשיחה רגילה או לשאלה שאתה יודע לענות עליה בביטחון."
+)
+SYSTEM_PROMPT += LOOKUP_PROMPT
+
 if EMAIL_ENABLED:
     SYSTEM_PROMPT += EMAIL_PROMPT
 
@@ -178,6 +188,73 @@ def generate(contents):
     raise last_err
 
 
+WIKI_HEADERS = {"User-Agent": "YemotAIAssistant/1.0 (personal phone assistant)"}
+SHORT_PROMPT = "ענה בעברית בשניים עד שלושה משפטים קצרים, בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים."
+
+
+def wikipedia_lookup(query):
+    for lang in ("he", "en"):
+        r = requests.get(
+            f"https://{lang}.wikipedia.org/w/api.php",
+            params={"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 1},
+            headers=WIKI_HEADERS,
+            timeout=8,
+        )
+        r.raise_for_status()
+        hits = r.json().get("query", {}).get("search", [])
+        if not hits:
+            continue
+        title = hits[0]["title"]
+        r2 = requests.get(
+            f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title.replace(' ', '_'), safe='')}",
+            headers=WIKI_HEADERS,
+            timeout=8,
+        )
+        r2.raise_for_status()
+        extract = (r2.json().get("extract") or "").strip()
+        if extract:
+            return f"{title}: {extract[:1500]}"
+    return ""
+
+
+def answer_from_text(question, info):
+    res = client.models.generate_content(
+        model=MODEL,
+        contents=f"שאלה: {question}\nמידע מוויקיפדיה: {info}\nענה על השאלה לפי המידע.",
+        config=types.GenerateContentConfig(system_instruction=SHORT_PROMPT, max_output_tokens=300),
+    )
+    return (res.text or "").strip()
+
+
+def web_lookup(question):
+    res = client.models.generate_content(
+        model=MODEL,
+        contents=question,
+        config=types.GenerateContentConfig(
+            system_instruction=SHORT_PROMPT,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            max_output_tokens=400,
+        ),
+    )
+    return (res.text or "").strip()
+
+
+def do_lookup(lookup, heard):
+    kind = (lookup.get("type") or "").lower()
+    query = (lookup.get("query") or heard or "").strip()
+    try:
+        if kind == "wikipedia":
+            info = wikipedia_lookup(query)
+            if info:
+                return answer_from_text(heard or query, info)
+            # לא נמצא בוויקיפדיה: ננסה חיפוש כללי
+            return web_lookup(heard or query)
+        return web_lookup(heard or query)
+    except Exception as e:
+        print("lookup error:", e, flush=True)
+        return ""
+
+
 def ask_gemini(call_id, audio_bytes):
     history = histories.setdefault(call_id, [])
     contents = list(history) + [
@@ -191,6 +268,12 @@ def ask_gemini(call_id, audio_bytes):
     heard = (data.get("heard") or "").strip()
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
     email_action = data.get("send_email") if EMAIL_ENABLED else None
+    lookup = data.get("lookup")
+    if isinstance(lookup, dict) and (lookup.get("query") or heard):
+        t = time.time()
+        found = do_lookup(lookup, heard)
+        print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
+        answer = found or "לא הצלחתי למצוא מידע על זה"
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
@@ -270,7 +353,7 @@ def ivr():
 
         # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-45 שניות
         if st["status"] == "processing":
-            if time.time() - st["started"] > 45:
+            if time.time() - st["started"] > 70:
                 st["status"] = "idle"
                 st["turn"] += 1
                 return Response(
