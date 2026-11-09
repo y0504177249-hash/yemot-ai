@@ -1,5 +1,7 @@
 import os
+import io
 import re
+import wave
 import json
 import time
 import threading
@@ -44,6 +46,16 @@ EMAIL_PROMPT = (
     "עם אותם פרטים שאושרו. אל תשלח לשם שאינו ברשימה."
 )
 
+# ---- קול טבעי (Gemini TTS) ----
+VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "1") == "1"
+TTS_MODEL = os.environ.get("TTS_MODEL", "").strip()
+# קולות חמים ורגועים קודם. מחליפים בהאמירה "החלף קול"
+VOICES = ["Sulafat", "Vindemiatrix", "Achernar", "Algieba", "Gacrux", "Aoede", "Charon", "Orus"]
+VOICE_PROMPT = (
+    " כשהמשתמש מבקש להחליף קול (למשל החלף קול), הגדר בפורמט ה-JSON את השדה change_voice=true, "
+    "וב-answer אמור שהחלפת קול. בכל מקרה אחר השדה change_voice הוא false."
+)
+
 SYSTEM_PROMPT = (
     "אתה עוזר קולי בשיחת טלפון. המשתמש שולח הקלטה בעברית. "
     "החזר JSON בלבד בפורמט: {\"heard\": \"מה שהמשתמש אמר\", \"answer\": \"התשובה שלך\"}. "
@@ -61,6 +73,8 @@ LOOKUP_PROMPT = (
     "כשמגדירים lookup השאר answer ריק. אל תחפש לשיחה רגילה או לשאלה שאתה יודע לענות עליה בביטחון."
 )
 SYSTEM_PROMPT += LOOKUP_PROMPT
+if VOICE_ENABLED:
+    SYSTEM_PROMPT += VOICE_PROMPT
 
 if EMAIL_ENABLED:
     SYSTEM_PROMPT += EMAIL_PROMPT
@@ -188,6 +202,72 @@ def generate(contents):
     raise last_err
 
 
+_tts_model_cache = {}
+
+
+def pick_tts_model():
+    if TTS_MODEL:
+        return TTS_MODEL
+    if "m" in _tts_model_cache:
+        return _tts_model_cache["m"]
+    name = "gemini-2.5-flash-preview-tts"
+    try:
+        for m in client.models.list():
+            n = (m.name or "").replace("models/", "")
+            if "tts" in n:
+                name = n
+                break
+    except Exception as e:
+        print("tts model list failed:", e, flush=True)
+    _tts_model_cache["m"] = name
+    return name
+
+
+def tts_wav(text, voice):
+    res = client.models.generate_content(
+        model=pick_tts_model(),
+        contents="אמור בקול אנושי חם, רגוע ומרגיע, בקצב נינוח: " + text,
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                )
+            ),
+        ),
+    )
+    pcm = res.candidates[0].content.parts[0].inline_data.data
+    buf = io.BytesIO()
+    w = wave.open(buf, "wb")
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(24000)
+    w.writeframes(pcm)
+    w.close()
+    return buf.getvalue()
+
+
+def upload_to_yemot(wav_bytes, name):
+    r = requests.post(
+        "https://www.call2all.co.il/ym/api/UploadFile",
+        data={
+            "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
+            "path": f"ivr2:{RECORD_PATH}/{name}.wav",
+            "convertAudio": "1",
+        },
+        files={"file": (name + ".wav", wav_bytes, "audio/wav")},
+        timeout=20,
+    )
+    r.raise_for_status()
+    try:
+        status = r.json().get("responseStatus")
+    except Exception:
+        status = None
+    if status != "OK":
+        raise RuntimeError(f"upload failed: {r.text[:200]}")
+    return f"{RECORD_PATH}/{name}"
+
+
 WIKI_HEADERS = {"User-Agent": "YemotAIAssistant/1.0 (personal phone assistant)"}
 SHORT_PROMPT = "ענה בעברית בשניים עד שלושה משפטים קצרים, בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים."
 
@@ -268,6 +348,7 @@ def ask_gemini(call_id, audio_bytes):
     heard = (data.get("heard") or "").strip()
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
     email_action = data.get("send_email") if EMAIL_ENABLED else None
+    change_voice = bool(data.get("change_voice")) if VOICE_ENABLED else False
     lookup = data.get("lookup")
     if isinstance(lookup, dict) and (lookup.get("query") or heard):
         t = time.time()
@@ -279,7 +360,7 @@ def ask_gemini(call_id, audio_bytes):
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
         history.append(types.Content(role="model", parts=[types.Part(text=answer)]))
         history[:] = history[-12:]
-    return answer, email_action
+    return answer, email_action, change_voice
 
 
 def worker(call_id, recorded, phone=""):
@@ -288,7 +369,7 @@ def worker(call_id, recorded, phone=""):
         audio = download_recording(recorded)
         print(f"timing: download {time.time() - t0:.1f}s, {len(audio)} bytes", flush=True)
         t1 = time.time()
-        answer, action = ask_gemini(call_id, audio)
+        answer, action, change_voice = ask_gemini(call_id, audio)
         print(f"timing: gemini {time.time() - t1:.1f}s", flush=True)
         if action and isinstance(action, dict):
             if phone not in ALLOWED_PHONES:
@@ -305,10 +386,32 @@ def worker(call_id, recorded, phone=""):
     except Exception as e:
         print("error:", e, flush=True)
         answer = "אירעה שגיאה נסה שוב"
+        change_voice = False
+
+    audio_path = None
+    if VOICE_ENABLED:
+        with lock:
+            st = calls.get(call_id)
+            if st is not None and change_voice:
+                st["voice"] = (st["voice"] + 1) % len(VOICES)
+            voice = VOICES[st["voice"]] if st is not None else VOICES[0]
+            turn = (st["turn"] + 1) if st is not None else 1
+        try:
+            t2 = time.time()
+            full_text = answer + ". לשאלה נוספת דבר, ובסיום הקש סולמית."
+            wav = tts_wav(full_text, voice)
+            name = "a" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(turn % 2)
+            audio_path = upload_to_yemot(wav, name)
+            print(f"timing: voice {voice} {time.time() - t2:.1f}s", flush=True)
+        except Exception as e:
+            print("voice error:", e, flush=True)
+            audio_path = None
+
     with lock:
         st = calls.get(call_id)
         if st is not None:
             st["answer"] = answer
+            st["audio"] = audio_path
             st["status"] = "done"
 
 
@@ -339,7 +442,7 @@ def ivr():
     with lock:
         cleanup_old()
         st = calls.setdefault(
-            call_id, {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0}
+            call_id, {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0, "voice": 0, "audio": None}
         )
         st["t"] = time.time()
 
@@ -366,6 +469,10 @@ def ivr():
         if st["status"] == "done":
             st["status"] = "idle"
             st["turn"] += 1
+            if st.get("audio"):
+                fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(st["turn"])
+                cmd = f"read=f-{st['audio']}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
+                return Response(cmd, mimetype="text/plain")
             text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
             return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
 
