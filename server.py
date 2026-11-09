@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 from flask import Flask, request, Response
@@ -42,12 +43,16 @@ histories = {}
 
 
 def clean_for_tts(text):
-    for ch in ['&', '=', ',', '*', '#', '"', "'", '\n', '\r', '-', '_']:
-        text = text.replace(ch, ' ')
-    return ' '.join(text.split())[:700]
+    # משאירים רק אותיות, ספרות ורווחים. סימנים מיוחדים עלולים לשבש את הפקודה בימות המשיח
+    text = re.sub(r"[^0-9A-Za-z\u0590-\u05FF ]", " ", text)
+    return " ".join(text.split())[:700]
 
 
 def download_recording(path):
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.lower().endswith(".wav"):
+        path += ".wav"
     r = requests.get(
         "https://www.call2all.co.il/ym/api/DownloadFile",
         params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": f"ivr2:{path}"},
@@ -85,9 +90,10 @@ def ask_gemini(call_id, audio_bytes):
     return answer
 
 
-def read_command(prompt_text):
-    # מקריא טקסט ואז מקליט את השאלה הבאה. ההקלטה נעצרת אוטומטית בשקט.
-    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{RECORD_PATH},q,no,yes,no"
+def read_command(prompt_text, call_id="x"):
+    # מקריא טקסט ואז מקליט את השאלה הבאה. ההקלטה מסתיימת בהקשת סולמית (#)
+    fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
+    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
 
 
 @app.route("/ivr", methods=["GET", "POST"])
@@ -106,17 +112,17 @@ def ivr():
 
     if not recorded:
         return Response(
-            read_command("שלום, אני העוזר החכם. שאל אותי כל שאלה, ואחרי התשובה אפשר להמשיך לשאול."),
+            read_command("שלום אני העוזר החכם שאל אותי כל שאלה ובסיום השאלה הקש סולמית", call_id),
             mimetype="text/plain",
         )
 
     try:
         audio = download_recording(recorded)
         answer = ask_gemini(call_id, audio)
-        return Response(read_command(answer), mimetype="text/plain")
+        return Response(read_command(answer + " לשאלה נוספת דבר ובסיום הקש סולמית", call_id), mimetype="text/plain")
     except Exception as e:
         print("error:", e)
-        return Response(read_command("אירעה שגיאה, נסה שוב"), mimetype="text/plain")
+        return Response(read_command("אירעה שגיאה נסה שוב בסיום הקש סולמית", call_id), mimetype="text/plain")
 
 
 if __name__ == "__main__":
