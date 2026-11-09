@@ -31,7 +31,7 @@ SYSTEM_PROMPT = (
 )
 
 app = Flask(__name__)
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
 
 
 @app.before_request
@@ -103,7 +103,7 @@ def candidate_models():
 def generate(contents):
     last_err = None
     for name in [MODEL]:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 return client.models.generate_content(
                     model=name,
@@ -117,7 +117,7 @@ def generate(contents):
             except Exception as e:
                 last_err = e
                 print(f"gemini {name} attempt {attempt + 1} failed: {e}", flush=True)
-                time.sleep(1.5)
+                time.sleep(0.5)
     for name in candidate_models()[1:]:
         try:
             return client.models.generate_content(
@@ -156,9 +156,13 @@ def ask_gemini(call_id, audio_bytes):
 
 
 def worker(call_id, recorded):
+    t0 = time.time()
     try:
         audio = download_recording(recorded)
+        print(f"timing: download {time.time() - t0:.1f}s, {len(audio)} bytes", flush=True)
+        t1 = time.time()
         answer = ask_gemini(call_id, audio)
+        print(f"timing: gemini {time.time() - t1:.1f}s", flush=True)
     except Exception as e:
         print("error:", e, flush=True)
         answer = "אירעה שגיאה נסה שוב"
@@ -196,7 +200,7 @@ def ivr():
     with lock:
         cleanup_old()
         st = calls.setdefault(
-            call_id, {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time()}
+            call_id, {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0}
         )
         st["t"] = time.time()
 
@@ -204,11 +208,19 @@ def ivr():
         if recorded and recorded != st["last"]:
             st["last"] = recorded
             st["status"] = "processing"
+            st["started"] = time.time()
             threading.Thread(target=worker, args=(call_id, recorded), daemon=True).start()
             return Response(wait_command(), mimetype="text/plain")
 
-        # עיבוד בעיצומו: ממשיכים להמתין
+        # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-45 שניות
         if st["status"] == "processing":
+            if time.time() - st["started"] > 45:
+                st["status"] = "idle"
+                st["turn"] += 1
+                return Response(
+                    read_command("התשובה מתעכבת נסה לשאול שוב ובסיום הקש סולמית", call_id, st["turn"]),
+                    mimetype="text/plain",
+                )
             return Response(wait_command(), mimetype="text/plain")
 
         # התשובה מוכנה: מקריאים ומקליטים שאלה הבאה
