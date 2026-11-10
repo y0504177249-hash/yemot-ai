@@ -98,6 +98,25 @@ if EMAIL_ENABLED:
     SYSTEM_PROMPT += EMAIL_PROMPT
 
 app = Flask(__name__)
+
+# הגדרה חד-פעמית לשלוחה 1.1 בימות, בהפעלה יזומה דרך משתנה סביבה
+if os.environ.get("CONFIGURE_YEMOT_EXTENSION") == "1":
+    try:
+        setup_response = requests.get(
+            "https://www.call2all.co.il/ym/api/UpdateExtension",
+            params={
+                "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
+                "path": "ivr2:1/1",
+                "type": "api",
+                "api_link": "https://yemot-smart-search.onrender.com/ivr",
+                "api_hangup_send": "yes",
+            },
+            timeout=20,
+        )
+        setup_response.raise_for_status()
+        print("Yemot 1.1 extension update:", setup_response.text[:500], flush=True)
+    except Exception as setup_error:
+        print("Yemot 1.1 extension update failed:", str(setup_error)[:300], flush=True)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
 _clients = {}
 _tls = threading.local()
