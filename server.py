@@ -522,9 +522,10 @@ def make_hold_music():
 def upload_hold_music():
     if not MUSIC_FILE:
         return
-    path = MUSIC_FILE if MUSIC_FILE.lower().endswith(".wav") else MUSIC_FILE + ".wav"
-    if not path.startswith("/"):
-        path = "/" + path
+    filename = MUSIC_FILE.rsplit("/", 1)[-1]
+    filename = filename if filename.lower().endswith(".wav") else filename + ".wav"
+    folder = EXTENSION_PATH.rstrip("/") or "/"
+    path = (folder + "/" + filename) if folder != "/" else "/" + filename
     wav_bytes = make_hold_music()
     response = requests.post(
         "https://www.call2all.co.il/ym/api/UploadFile",
