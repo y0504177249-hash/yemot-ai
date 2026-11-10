@@ -37,16 +37,19 @@ ALLOWED_PHONES = [x.strip() for x in os.environ.get("ALLOWED_PHONES", "").split(
 # שליחה דרך ה-Gmail שלך באמצעות Google Apps Script (בלי שירות צד שלישי)
 MAIL_WEBHOOK_URL = os.environ.get("MAIL_WEBHOOK_URL", "").strip()
 MAIL_WEBHOOK_SECRET = os.environ.get("MAIL_WEBHOOK_SECRET", "").strip()
-EMAIL_ENABLED = bool(MAIL_CONTACTS and ((MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET) or (BREVO_API_KEY and MAIL_FROM)))
+WEBHOOK_ENABLED = bool(MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET)
+EMAIL_ENABLED = bool(WEBHOOK_ENABLED or (BREVO_API_KEY and MAIL_FROM))
 
 EMAIL_PROMPT = (
-    " אפשר לשלוח מייל. אנשי הקשר המותרים: " + ", ".join(MAIL_CONTACTS.keys()) + ". "
-    "בפורמט ה-JSON הוסף שדה send_email, ברירת מחדל null. "
-    "כשהמשתמש מבקש לשלוח מייל, אל תשלח מיד: ב-answer אמור למי, מה הנושא ומה התוכן בקצרה, "
-    "ושאל אם לשלוח, ובקש שיגיד כן או לא, ושדה send_email נשאר null. "
-    "רק אם בהקלטה הנוכחית המשתמש אישר במפורש (כן), מלא "
-    "send_email={\"to\": \"שם איש קשר מהרשימה בדיוק\", \"subject\": \"נושא\", \"body\": \"תוכן\"} "
-    "עם אותם פרטים שאושרו. אל תשלח לשם שאינו ברשימה."
+    " יש לך גישה לתיבת המייל של המשתמש. בפורמט ה-JSON אפשר להוסיף את השדות send_email, mail, confirm_pending (ברירת מחדל null). "
+    "כשמגדירים אחד מהם השאר answer ריק. "
+    "לשליחת מייל הגדר send_email={\"to\": \"שם איש קשר או שם אדם או כתובת מייל מלאה באותיות לועזיות\", \"subject\": \"נושא\", \"body\": \"תוכן\"}. "
+    "אל תשאל אישור בעצמך: השרת בודק את הכתובת, מקריא אותה ושואל את המשתמש. "
+    "אנשי קשר ידועים: " + (", ".join(MAIL_CONTACTS.keys()) or "אין") + ". "
+    "כשהמשתמש אומר כתובת מייל בקול, כתוב אותה בצורה תקנית (שטרודל הוא @ ונקודה היא .). "
+    "אם יש הערת מערכת שמייל ממתין לאישור: כן או אישור = confirm_pending=\"yes\", לא או ביטול = confirm_pending=\"no\", ובקשת שינוי = send_email חדש. "
+    "לקריאת מיילים הגדר mail={\"action\": \"search\", \"query\": \"שאילתת ג'ימייל\"}, למשל is:unread או from:דני או newer_than:1d או subject:חשבונית או in:inbox. "
+    "אחר כך אפשר לקרוא מייל מהרשימה האחרונה לפי מספר: mail={\"action\": \"read\", \"index\": 1, \"full\": false}. full=true רק אם ביקש להקריא את כל המייל."
 )
 
 # ---- קול טבעי (Gemini TTS) ----
@@ -121,20 +124,30 @@ def wait_command():
     return f"id_list_message=t-נא להמתין&go_to_folder={EXTENSION_PATH}"
 
 
-def send_email(to_name, subject, body):
-    to_addr = MAIL_CONTACTS.get(to_name)
-    if not to_addr:
-        raise ValueError(f"contact not allowed: {to_name}")
-    if MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET:
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
+MAIL_READ_PROMPT = "ענה בעברית בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים."
+
+
+def mail_json(payload):
+    r = requests.post(MAIL_WEBHOOK_URL, json=dict(payload, secret=MAIL_WEBHOOK_SECRET), timeout=25)
+    r.raise_for_status()
+    txt = r.text.strip()
+    if txt == "forbidden":
+        raise RuntimeError("webhook: forbidden (secret mismatch)")
+    try:
+        return json.loads(txt)
+    except Exception:
+        raise RuntimeError(f"webhook bad response: {txt[:100]}")
+
+
+def send_mail_to(to_addr, subject, body):
+    subject = (subject or "הודעה")[:200]
+    body = (body or "")[:5000]
+    if WEBHOOK_ENABLED:
         r = requests.post(
             MAIL_WEBHOOK_URL,
-            json={
-                "secret": MAIL_WEBHOOK_SECRET,
-                "to": to_addr,
-                "subject": (subject or "הודעה")[:200],
-                "body": (body or "")[:5000],
-            },
-            timeout=20,
+            json={"secret": MAIL_WEBHOOK_SECRET, "action": "send", "to": to_addr, "subject": subject, "body": body},
+            timeout=25,
         )
         r.raise_for_status()
         if r.text.strip() != "ok":
@@ -146,12 +159,118 @@ def send_email(to_name, subject, body):
         json={
             "sender": {"email": MAIL_FROM, "name": "העוזר החכם"},
             "to": [{"email": to_addr}],
-            "subject": (subject or "הודעה")[:200],
-            "textContent": (body or "")[:5000],
+            "subject": subject,
+            "textContent": body,
         },
         timeout=15,
     )
     r.raise_for_status()
+
+
+def speak_email(addr):
+    return (
+        addr.replace("@", " שטרודל ").replace(".", " נקודה ").replace("-", " מקף ").replace("_", " קו תחתון ")
+    )
+
+
+def resolve_recipient(to):
+    # מחזיר רשימת מועמדים: [{"name":..., "email":...}]
+    if to in MAIL_CONTACTS:
+        return [{"name": to, "email": MAIL_CONTACTS[to]}]
+    if EMAIL_RE.match(to):
+        return [{"name": "", "email": to}]
+    if WEBHOOK_ENABLED:
+        res = mail_json({"action": "find_contact", "name": to})
+        return [c for c in res.get("contacts", []) if c.get("email")]
+    return []
+
+
+def prepare_email(call_id, action):
+    to = (action.get("to") or "").strip()
+    subject = (action.get("subject") or "").strip()
+    body = (action.get("body") or "").strip()
+    if not to or not body:
+        return "למי לשלוח ומה לכתוב במייל"
+    cands = resolve_recipient(to)
+    if not cands:
+        return f"לא מצאתי כתובת עבור {to}. אמור את כתובת המייל המלאה"
+    if len(cands) > 1:
+        names = ", ".join(f"{c.get('name') or ''} {speak_email(c['email'])}" for c in cands[:3])
+        return f"מצאתי כמה אפשרויות: {names}. אמור את הכתובת המלאה של מי שאתה מתכוון אליו"
+    c = cands[0]
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["pending"] = {"addr": c["email"], "subject": subject or "הודעה", "body": body}
+    if c.get("name"):
+        target = f"ל{c['name']} בכתובת {speak_email(c['email'])}"
+    else:
+        target = f"לכתובת {speak_email(c['email'])}"
+    return (
+        f"אני עומד לשלוח {target} עם הנושא {subject or 'הודעה'} "
+        f"והתוכן: {body[:300]}. לשלוח? אמור כן או לא"
+    )
+
+
+def confirm_email(call_id, decision):
+    with lock:
+        st = calls.get(call_id)
+        pend = st.get("pending") if st else None
+        if st is not None:
+            st["pending"] = None
+    if not pend:
+        return "אין מייל ממתין לשליחה"
+    if str(decision).lower() != "yes":
+        return "ביטלתי את המייל"
+    send_mail_to(pend["addr"], pend["subject"], pend["body"])
+    return "המייל נשלח"
+
+
+def handle_mail(call_id, mail, heard):
+    act = (mail.get("action") or "").lower()
+    if act == "search":
+        res = mail_json({"action": "search", "query": mail.get("query") or "in:inbox", "max": 5})
+        items = res.get("messages", [])
+        with lock:
+            st = calls.get(call_id)
+            if st is not None:
+                st["mails"] = [m["id"] for m in items]
+        if not items:
+            return "לא נמצאו מיילים"
+        lines = []
+        for i, m in enumerate(items, 1):
+            flag = "לא נקרא" if m.get("unread") else "נקרא"
+            lines.append(
+                f"{i}. מאת {m.get('from', '')} | נושא: {m.get('subject', '')} | {m.get('date', '')} | {flag} | תקציר: {m.get('snippet', '')}"
+            )
+        out = call_model(
+            f"בקשת המשתמש: {heard}\nהמיילים:\n" + "\n".join(lines) +
+            "\nהקרא למשתמש בקצרה את המיילים לפי מספר: שולח ונושא, ואמור שאפשר לבקש לקרוא מייל לפי מספר.",
+            types.GenerateContentConfig(system_instruction=MAIL_READ_PROMPT, max_output_tokens=600),
+        )
+        return (out.text or "").strip() or "לא הצלחתי לקרוא את המיילים"
+    if act == "read":
+        try:
+            idx = int(mail.get("index") or 1)
+        except Exception:
+            idx = 1
+        with lock:
+            st = calls.get(call_id)
+            ids = list(st.get("mails", [])) if st else []
+        if not ids or idx < 1 or idx > len(ids):
+            return "קודם בקש לראות את רשימת המיילים"
+        res = mail_json({"action": "read", "id": ids[idx - 1]})
+        body = (res.get("body") or "")[:3000]
+        if bool(mail.get("full")):
+            instr = "הקרא את תוכן המייל כמעט מילה במילה, בלי להוסיף דברים"
+        else:
+            instr = "סכם את המייל בשלושה עד ארבעה משפטים"
+        out = call_model(
+            f"מאת: {res.get('from', '')}\nנושא: {res.get('subject', '')}\nתוכן: {body}\n{instr}.",
+            types.GenerateContentConfig(system_instruction=MAIL_READ_PROMPT, max_output_tokens=900),
+        )
+        return (out.text or "").strip() or "לא הצלחתי לקרוא את המייל"
+    return "לא הבנתי מה לעשות עם המיילים"
 
 
 def download_recording(path):
@@ -371,32 +490,52 @@ def do_lookup(lookup, heard):
         return ""
 
 
-def ask_gemini(call_id, audio_bytes):
+def ask_gemini(call_id, audio_bytes, phone=""):
     history = histories.setdefault(call_id, [])
-    contents = list(history) + [
-        types.Content(
-            role="user",
-            parts=[types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")],
-        )
-    ]
+    parts = [types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")]
+    with lock:
+        st0 = calls.get(call_id)
+        has_pending = bool(st0 and st0.get("pending"))
+    if has_pending and EMAIL_ENABLED:
+        parts.append(types.Part(text="הערת מערכת: יש מייל ממתין לאישור המשתמש."))
+    contents = list(history) + [types.Content(role="user", parts=parts)]
     res = generate(contents)
     data = json.loads(res.text)
     heard = (data.get("heard") or "").strip()
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
-    email_action = data.get("send_email") if EMAIL_ENABLED else None
     change_voice = bool(data.get("change_voice")) if VOICE_ENABLED else False
     lookup = data.get("lookup")
-    if isinstance(lookup, dict) and (lookup.get("query") or heard):
-        t = time.time()
-        found = do_lookup(lookup, heard)
-        print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
-        answer = found or "לא הצלחתי למצוא מידע על זה"
+    send = data.get("send_email")
+    mail = data.get("mail")
+    confirm = data.get("confirm_pending")
+
+    try:
+        if EMAIL_ENABLED and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
+            if phone not in ALLOWED_PHONES:
+                print("mail blocked: phone not allowed", flush=True)
+                answer = "אין לך הרשאה לגשת למיילים"
+            elif confirm:
+                answer = confirm_email(call_id, confirm)
+            elif isinstance(send, dict):
+                answer = prepare_email(call_id, send)
+            elif isinstance(mail, dict) and WEBHOOK_ENABLED:
+                t = time.time()
+                answer = handle_mail(call_id, mail, heard)
+                print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
+        elif isinstance(lookup, dict) and (lookup.get("query") or heard):
+            t = time.time()
+            found = do_lookup(lookup, heard)
+            print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
+            answer = found or "לא הצלחתי למצוא מידע על זה"
+    except Exception as e:
+        print("action error:", e, flush=True)
+        answer = "לא הצלחתי לבצע את הפעולה"
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
         history.append(types.Content(role="model", parts=[types.Part(text=answer)]))
         history[:] = history[-12:]
-    return answer, email_action, change_voice
+    return answer, change_voice
 
 
 def worker(call_id, recorded, phone=""):
@@ -406,20 +545,8 @@ def worker(call_id, recorded, phone=""):
         audio = download_recording(recorded)
         print(f"timing: download {time.time() - t0:.1f}s, {len(audio)} bytes", flush=True)
         t1 = time.time()
-        answer, action, change_voice = ask_gemini(call_id, audio)
+        answer, change_voice = ask_gemini(call_id, audio, phone)
         print(f"timing: gemini {time.time() - t1:.1f}s", flush=True)
-        if action and isinstance(action, dict):
-            if phone not in ALLOWED_PHONES:
-                print("email blocked: phone not allowed", flush=True)
-                answer = "אין לך הרשאה לשלוח מיילים"
-            else:
-                try:
-                    send_email(action.get("to"), action.get("subject"), action.get("body"))
-                    print("email sent to", action.get("to"), flush=True)
-                    answer = "המייל נשלח"
-                except Exception as e:
-                    print("email error:", e, flush=True)
-                    answer = "לא הצלחתי לשלוח את המייל"
     except Exception as e:
         print("error:", e, flush=True)
         answer = "אירעה שגיאה נסה שוב"
