@@ -14,6 +14,11 @@ from google.genai import types
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+# מפתח Gemini נפרד לכל מתקשר (לפי מספר טלפון), כדי שלכל אדם תהיה מכסה משלו. למשל {"0501234567": "AIza..."}
+try:
+    GEMINI_KEYS = json.loads(os.environ.get("GEMINI_KEYS", "{}"))
+except Exception:
+    GEMINI_KEYS = {}
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 # תיקייה לשמירת ההקלטות בימות המשיח
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
@@ -94,6 +99,26 @@ if EMAIL_ENABLED:
 
 app = Flask(__name__)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
+_clients = {}
+_tls = threading.local()
+
+
+def client_for(phone):
+    key = GEMINI_KEYS.get(phone)
+    if not key:
+        return client
+    if key not in _clients:
+        _clients[key] = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000))
+    return _clients[key]
+
+
+def cur_client():
+    return getattr(_tls, "client", None) or client
+
+
+def _bk(name):
+    # מכסות נספרות לכל מפתח בנפרד
+    return f"{getattr(_tls, 'keyid', 'default')}:{name}"
 
 
 @app.before_request
@@ -306,15 +331,15 @@ _discovered = {"done": False, "names": []}
 def _mark_bad(name, err):
     msg = str(err)
     if "404" in msg or "NOT_FOUND" in msg:
-        _bad_models[name] = time.time() + 86400  # לא קיים: יום שלם
+        _bad_models[_bk(name)] = time.time() + 86400  # לא קיים: יום שלם
     elif "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-        _bad_models[name] = time.time() + 3600  # מכסה נגמרה: שעה
+        _bad_models[_bk(name)] = time.time() + 3600  # מכסה נגמרה: שעה
     else:
-        _bad_models[name] = time.time() + 30
+        _bad_models[_bk(name)] = time.time() + 30
 
 
 def _is_bad(name):
-    return _bad_models.get(name, 0) > time.time()
+    return _bad_models.get(_bk(name), 0) > time.time()
 
 
 def discover_models():
@@ -322,7 +347,7 @@ def discover_models():
     if not _discovered["done"]:
         _discovered["done"] = True
         try:
-            for m in client.models.list():
+            for m in cur_client().models.list():
                 n = (m.name or "").replace("models/", "")
                 actions = getattr(m, "supported_actions", None) or []
                 skip = ("tts", "image", "live", "audio", "embed", "2.5", "2.0", "1.5")
@@ -343,7 +368,7 @@ def call_model(contents, config):
                 continue
             for attempt in (1, 2):
                 try:
-                    return client.models.generate_content(model=name, contents=contents, config=config)
+                    return cur_client().models.generate_content(model=name, contents=contents, config=config)
                 except Exception as e:
                     last_err = e
                     msg = str(e)
@@ -382,7 +407,7 @@ def tts_wav(text, voice):
             if with_style:
                 part["speech_metadata"] = {"style": TTS_STYLE}
             try:
-                res = client.models.generate_content(
+                res = cur_client().models.generate_content(
                     model=name,
                     contents=[{"role": "user", "parts": [part]}],
                     config={
@@ -547,6 +572,8 @@ def ask_gemini(call_id, audio_bytes, phone=""):
 
 
 def worker(call_id, recorded, phone=""):
+    _tls.client = client_for(phone)
+    _tls.keyid = phone if phone in GEMINI_KEYS else "default"
     t0 = time.time()
     failed = False
     try:
