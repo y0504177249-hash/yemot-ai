@@ -413,7 +413,7 @@ def generate(contents):
 
 
 TTS_MODELS = [TTS_MODEL] if TTS_MODEL else ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"]
-TTS_STYLE = "warm, calm and soothing, slow gentle pace, like a kind friend"
+TTS_STYLE = "A warm, gentle, calming and reassuring voice, soft and friendly, speaking Hebrew clearly at a relaxed slightly slow pace, with natural pauses and a soothing conversational tone. Never rushed, sharp, or overly theatrical."
 
 
 def tts_wav(text, voice):
@@ -617,7 +617,7 @@ def worker(call_id, recorded, phone=""):
             turn = (st["turn"] + 1) if st is not None else 1
         try:
             t2 = time.time()
-            full_text = answer + ". לשאלה נוספת דבר, ובסיום הקש סולמית."
+            full_text = answer + ". לשאלה נוספת, פשוט דבר. אחרי כל שאלה הקש סולמית כדי לסיים את ההקלטה."
             wav = tts_wav(full_text, voice)
             name = "a" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(turn % 2)
             audio_path = upload_to_yemot(wav, name)
@@ -679,7 +679,7 @@ def ivr():
                 st["status"] = "idle"
                 st["turn"] += 1
                 return Response(
-                    read_command("התשובה מתעכבת נסה לשאול שוב ובסיום הקש סולמית", call_id, st["turn"]),
+                    read_command("התשובה מתעכבת. נסה לשאול שוב, ואחרי השאלה הקש סולמית.", call_id, st["turn"]),
                     mimetype="text/plain",
                 )
             return Response(wait_command(), mimetype="text/plain")
@@ -692,13 +692,13 @@ def ivr():
                 fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(st["turn"])
                 cmd = f"read=f-{st['audio']}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
                 return Response(cmd, mimetype="text/plain")
-            text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
+            text = st["answer"] + " לשאלה נוספת, פשוט דבר. אחרי כל שאלה הקש סולמית כדי לסיים את ההקלטה."
             return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
 
         # כניסה ראשונה לשלוחה
         return Response(
             read_command(
-                "שלום אני העוזר החכם שאל אותי כל שאלה ובסיום השאלה הקש סולמית", call_id, st["turn"]
+                "שלום, אני העוזר החכם. אפשר לשאול אותי כל שאלה. אחרי כל שאלה הקש סולמית כדי לסיים את ההקלטה.", call_id, st["turn"]
             ),
             mimetype="text/plain",
         )
