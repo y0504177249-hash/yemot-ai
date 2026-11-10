@@ -2,6 +2,7 @@ import os
 import io
 import re
 import wave
+import math
 import json
 import time
 import threading
@@ -474,6 +475,80 @@ def upload_to_yemot(wav_bytes, name):
     if status != "OK":
         raise RuntimeError(f"upload failed: {r.text[:200]}")
     return f"{RECORD_PATH}/{name}"
+
+
+def make_hold_music():
+    # מנגינת המתנה מקורית ועדינה: פעמוני פסנתר רכים ופד אווירתי, ללא מילים
+    rate = 22050
+    duration = 18
+    total = rate * duration
+    chords = [
+        [261.63, 329.63, 392.00, 523.25],  # C
+        [220.00, 261.63, 329.63, 440.00],  # Am
+        [174.61, 220.00, 261.63, 349.23],  # F
+        [196.00, 246.94, 293.66, 392.00],  # G
+    ]
+    frames = bytearray()
+    for i in range(total):
+        t = i / rate
+        chord = chords[int(t // 4.5) % len(chords)]
+        fade = min(1.0, t / 2.0, (duration - t) / 2.5)
+        sample = 0.0
+        for j, freq in enumerate(chord):
+            # שכבת רקע רכה ומתמשכת
+            sample += 0.11 * math.sin(2 * math.pi * freq * t + j * 0.4)
+            sample += 0.035 * math.sin(2 * math.pi * freq * 2.002 * t + j)
+        # צלילי פסנתר עדינים במרווחים, עם דעיכה טבעית
+        beat = t % 1.5
+        note_index = int(t / 1.5) % 4
+        note_freq = chord[note_index]
+        bell = 0.0
+        if beat < 1.25:
+            bell = 0.16 * math.exp(-3.0 * beat) * (
+                math.sin(2 * math.pi * note_freq * beat) +
+                0.28 * math.sin(2 * math.pi * note_freq * 2.01 * beat)
+            )
+        value = max(-0.85, min(0.85, (sample + bell) * fade * 0.62))
+        frames.extend(int(value * 32767).to_bytes(2, "little", signed=True))
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(frames)
+    return out.getvalue()
+
+
+def upload_hold_music():
+    if not MUSIC_FILE:
+        return
+    path = MUSIC_FILE if MUSIC_FILE.lower().endswith(".wav") else MUSIC_FILE + ".wav"
+    if not path.startswith("/"):
+        path = "/" + path
+    wav_bytes = make_hold_music()
+    response = requests.post(
+        "https://www.call2all.co.il/ym/api/UploadFile",
+        data={
+            "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
+            "path": f"ivr2:{path}",
+            "convertAudio": "1",
+        },
+        files={"file": ("hold_music.wav", wav_bytes, "audio/wav")},
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if result.get("responseStatus") != "OK":
+        raise RuntimeError(f"hold music upload failed: {response.text[:200]}")
+    print("Yemot hold music uploaded:", path, flush=True)
+
+
+# העלאת מנגינת המתנה מקורית לימות בעת הפעלת השירות
+if MUSIC_FILE:
+    try:
+        upload_hold_music()
+    except Exception as music_error:
+        print("Yemot hold music setup failed:", str(music_error)[:300], flush=True)
 
 
 WIKI_HEADERS = {"User-Agent": "YemotAIAssistant/1.0 (personal phone assistant)"}
