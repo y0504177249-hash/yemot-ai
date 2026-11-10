@@ -85,10 +85,10 @@ SYSTEM_PROMPT = (
 
 LOOKUP_PROMPT = (
     " אפשר לחפש מידע. בפורמט ה-JSON הוסף שדה lookup, ברירת מחדל null. "
-    "לשאלות על ידע כללי, אנשים, מקומות, מושגים והיסטוריה הגדר "
-    "lookup={\"type\": \"wikipedia\", \"query\": \"שם הערך\"}. "
-    "לחדשות, מזג אוויר, מחירים, תוצאות ספורט ושאלות עדכניות הגדר "
-    "lookup={\"type\": \"web\", \"query\": \"מה לחפש\"}. "
+    "אם המשתמש אומר במפורש חפש באינטרנט, חפש ברשת, בדוק באינטרנט או בדוק מקורות, חובה להגדיר "
+    "lookup={\"type\": \"web\", \"query\": \"שאילתת חיפוש ממוקדת\"}. "
+    "לחדשות, מזג אוויר, מחירים, תוצאות ספורט וכל מידע עדכני הגדר גם כן lookup מסוג web. "
+    "לשאלות ידע כללי, אנשים, מקומות, מושגים והיסטוריה שאינן בקשת חיפוש מפורשת, אפשר להשתמש בוויקיפדיה. "
     "כשמגדירים lookup השאר answer ריק. אל תחפש לשיחה רגילה או לשאלה שאתה יודע לענות עליה בביטחון."
 )
 SYSTEM_PROMPT += LOOKUP_PROMPT
@@ -554,6 +554,12 @@ if MUSIC_FILE:
 
 WIKI_HEADERS = {"User-Agent": "YemotAIAssistant/1.0 (personal phone assistant)"}
 SHORT_PROMPT = "ענה בעברית בשניים עד שלושה משפטים קצרים, בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים."
+WEB_RESEARCH_PROMPT = (
+    "בצע מחקר יסודי על סמך תוצאות Google Search. חפש כמה היבטים של השאלה והצלב מידע בין כמה מקורות אמינים ועצמאיים כשאפשר. "
+    "העדף מקורות רשמיים, מחקרים וגופי חדשות מוכרים; בדוק תאריכים והבחן בין עובדות, הערכות ודעות. "
+    "ענה בעברית בצורה מקיפה אך מתאימה להקראה בטלפון: בדרך כלל חמש עד שמונה משפטים, עם הפרטים החשובים, מסקנה ושמות המקורות המרכזיים. "
+    "אם יש מחלוקת או שאין מידע מספיק, אמור זאת במפורש ואל תמציא. בלי כוכביות, אימוג'ים או סימנים מיוחדים."
+)
 
 
 def wikipedia_lookup(query):
@@ -593,9 +599,9 @@ def web_lookup(question):
     res = call_model(
         question,
         types.GenerateContentConfig(
-            system_instruction=SHORT_PROMPT,
+            system_instruction=WEB_RESEARCH_PROMPT,
             tools=[types.Tool(google_search=types.GoogleSearch())],
-            max_output_tokens=400,
+            max_output_tokens=900,
         ),
     )
     return (res.text or "").strip()
