@@ -34,6 +34,13 @@ except Exception:
     MAIL_CONTACTS = {}
 # מספרי טלפון שמורשים לשלוח מיילים (מופרדים בפסיק). ריק = אף אחד
 ALLOWED_PHONES = [x.strip() for x in os.environ.get("ALLOWED_PHONES", "").split(",") if x.strip()]
+# ALLOWED_PHONES=* מתיר לכל מי שמגיע לשלוחה (למשל מי שהזין את סיסמת השלוחה בימות המשיח)
+ALLOW_ALL_PHONES = "*" in ALLOWED_PHONES
+
+
+def phone_allowed(phone):
+    return ALLOW_ALL_PHONES or phone in ALLOWED_PHONES
+
 # שליחה דרך ה-Gmail שלך באמצעות Google Apps Script (בלי שירות צד שלישי)
 MAIL_WEBHOOK_URL = os.environ.get("MAIL_WEBHOOK_URL", "").strip()
 MAIL_WEBHOOK_SECRET = os.environ.get("MAIL_WEBHOOK_SECRET", "").strip()
@@ -511,7 +518,8 @@ def ask_gemini(call_id, audio_bytes, phone=""):
 
     try:
         if EMAIL_ENABLED and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
-            if phone not in ALLOWED_PHONES:
+            print(f"mail request from {phone or 'unknown'}", flush=True)
+            if not phone_allowed(phone):
                 print("mail blocked: phone not allowed", flush=True)
                 answer = "אין לך הרשאה לגשת למיילים"
             elif confirm:
