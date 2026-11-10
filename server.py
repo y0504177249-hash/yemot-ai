@@ -34,7 +34,10 @@ except Exception:
     MAIL_CONTACTS = {}
 # מספרי טלפון שמורשים לשלוח מיילים (מופרדים בפסיק). ריק = אף אחד
 ALLOWED_PHONES = [x.strip() for x in os.environ.get("ALLOWED_PHONES", "").split(",") if x.strip()]
-EMAIL_ENABLED = bool(BREVO_API_KEY and MAIL_FROM and MAIL_CONTACTS)
+# שליחה דרך ה-Gmail שלך באמצעות Google Apps Script (בלי שירות צד שלישי)
+MAIL_WEBHOOK_URL = os.environ.get("MAIL_WEBHOOK_URL", "").strip()
+MAIL_WEBHOOK_SECRET = os.environ.get("MAIL_WEBHOOK_SECRET", "").strip()
+EMAIL_ENABLED = bool(MAIL_CONTACTS and ((MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET) or (BREVO_API_KEY and MAIL_FROM)))
 
 EMAIL_PROMPT = (
     " אפשר לשלוח מייל. אנשי הקשר המותרים: " + ", ".join(MAIL_CONTACTS.keys()) + ". "
@@ -50,7 +53,7 @@ EMAIL_PROMPT = (
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "1") == "1"
 TTS_MODEL = os.environ.get("TTS_MODEL", "").strip()
 # קולות חמים ורגועים קודם. מחליפים בהאמירה "החלף קול"
-VOICES = ["Sulafat", "Vindemiatrix", "Achernar", "Algieba", "Gacrux", "Aoede", "Charon", "Orus"]
+VOICES = ["Sulafat", "Vindemiatrix", "Achernar", "Achird", "Algieba", "Gacrux", "Despina", "Schedar"]
 VOICE_PROMPT = (
     " כשהמשתמש מבקש להחליף קול (למשל החלף קול), הגדר בפורמט ה-JSON את השדה change_voice=true, "
     "וב-answer אמור שהחלפת קול. בכל מקרה אחר השדה change_voice הוא false."
@@ -122,6 +125,21 @@ def send_email(to_name, subject, body):
     to_addr = MAIL_CONTACTS.get(to_name)
     if not to_addr:
         raise ValueError(f"contact not allowed: {to_name}")
+    if MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET:
+        r = requests.post(
+            MAIL_WEBHOOK_URL,
+            json={
+                "secret": MAIL_WEBHOOK_SECRET,
+                "to": to_addr,
+                "subject": (subject or "הודעה")[:200],
+                "body": (body or "")[:5000],
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        if r.text.strip() != "ok":
+            raise RuntimeError(f"webhook said: {r.text[:100]}")
+        return
     r = requests.post(
         "https://api.brevo.com/v3/smtp/email",
         headers={"api-key": BREVO_API_KEY, "content-type": "application/json"},
@@ -150,101 +168,121 @@ def download_recording(path):
     return r.content
 
 
-def candidate_models():
-    # המודל שהוגדר ואחריו עד שני מודלי flash זמינים נוספים, למקרה של עומס או הסרה
-    names = [MODEL]
-    try:
-        for m in client.models.list():
-            n = (m.name or "").replace("models/", "")
-            actions = getattr(m, "supported_actions", None) or []
-            if "flash" in n and "generateContent" in actions and n not in names:
-                if not any(x in n for x in ("image", "tts", "live", "audio", "preview-tts")):
-                    names.append(n)
-            if len(names) >= 3:
-                break
-    except Exception as e:
-        print("list models failed:", e, flush=True)
-    return names
+FALLBACK_MODELS = [
+    x.strip()
+    for x in os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-3.8-flash-lite,gemini-3.5-flash-lite,gemini-3.5-flash").split(",")
+    if x.strip()
+]
+_bad_models = {}  # שם מודל -> זמן (epoch) שעד אליו מדלגים עליו
+_discovered = {"done": False, "names": []}
+
+
+def _mark_bad(name, err):
+    msg = str(err)
+    if "404" in msg or "NOT_FOUND" in msg:
+        _bad_models[name] = time.time() + 86400  # לא קיים: יום שלם
+    elif "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+        _bad_models[name] = time.time() + 3600  # מכסה נגמרה: שעה
+    else:
+        _bad_models[name] = time.time() + 30
+
+
+def _is_bad(name):
+    return _bad_models.get(name, 0) > time.time()
+
+
+def discover_models():
+    # גילוי מודלי flash זמינים נוספים, פעם אחת בלבד
+    if not _discovered["done"]:
+        _discovered["done"] = True
+        try:
+            for m in client.models.list():
+                n = (m.name or "").replace("models/", "")
+                actions = getattr(m, "supported_actions", None) or []
+                skip = ("tts", "image", "live", "audio", "embed", "2.5", "2.0", "1.5")
+                if "flash" in n and "generateContent" in actions and not any(x in n for x in skip):
+                    _discovered["names"].append(n)
+        except Exception as e:
+            print("list models failed:", e, flush=True)
+    return _discovered["names"]
+
+
+def call_model(contents, config):
+    last_err = None
+    base = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
+    for stage in (0, 1):
+        names = base if stage == 0 else [n for n in discover_models() if n not in base]
+        for name in names:
+            if _is_bad(name):
+                continue
+            for attempt in (1, 2):
+                try:
+                    return client.models.generate_content(model=name, contents=contents, config=config)
+                except Exception as e:
+                    last_err = e
+                    msg = str(e)
+                    print(f"gemini {name} attempt {attempt} failed: {msg[:200]}", flush=True)
+                    transient = any(x in msg for x in ("503", "UNAVAILABLE", "504", "DEADLINE"))
+                    if transient and attempt == 1:
+                        time.sleep(0.5)
+                        continue
+                    _mark_bad(name, e)
+                    break
+    raise last_err or RuntimeError("no model available")
 
 
 def generate(contents):
-    last_err = None
-    for name in [MODEL]:
-        for attempt in range(2):
-            try:
-                return client.models.generate_content(
-                    model=name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        response_mime_type="application/json",
-                        max_output_tokens=400,
-                    ),
-                )
-            except Exception as e:
-                last_err = e
-                print(f"gemini {name} attempt {attempt + 1} failed: {e}", flush=True)
-                time.sleep(0.5)
-    for name in candidate_models()[1:]:
-        try:
-            return client.models.generate_content(
-                model=name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    max_output_tokens=400,
-                ),
-            )
-        except Exception as e:
-            last_err = e
-            print(f"gemini fallback {name} failed: {e}", flush=True)
-    raise last_err
+    return call_model(
+        contents,
+        types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            max_output_tokens=400,
+        ),
+    )
 
 
-_tts_model_cache = {}
-
-
-def pick_tts_model():
-    if TTS_MODEL:
-        return TTS_MODEL
-    if "m" in _tts_model_cache:
-        return _tts_model_cache["m"]
-    name = "gemini-2.5-flash-preview-tts"
-    try:
-        for m in client.models.list():
-            n = (m.name or "").replace("models/", "")
-            if "tts" in n:
-                name = n
-                break
-    except Exception as e:
-        print("tts model list failed:", e, flush=True)
-    _tts_model_cache["m"] = name
-    return name
+TTS_MODELS = [TTS_MODEL] if TTS_MODEL else ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"]
+TTS_STYLE = "warm, calm and soothing, slow gentle pace, like a kind friend"
 
 
 def tts_wav(text, voice):
-    res = client.models.generate_content(
-        model=pick_tts_model(),
-        contents="אמור בקול אנושי חם, רגוע ומרגיע, בקצב נינוח: " + text,
-        config=types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+    last_err = None
+    for name in TTS_MODELS:
+        if _is_bad(name):
+            continue
+        for with_style in (True, False):
+            part = {"text": text}
+            if with_style:
+                part["speech_metadata"] = {"style": TTS_STYLE}
+            try:
+                res = client.models.generate_content(
+                    model=name,
+                    contents=[{"role": "user", "parts": [part]}],
+                    config={
+                        "response_modalities": ["AUDIO"],
+                        "speech_config": {"voice_config": {"voice": voice}},
+                    },
                 )
-            ),
-        ),
-    )
-    pcm = res.candidates[0].content.parts[0].inline_data.data
-    buf = io.BytesIO()
-    w = wave.open(buf, "wb")
-    w.setnchannels(1)
-    w.setsampwidth(2)
-    w.setframerate(24000)
-    w.writeframes(pcm)
-    w.close()
-    return buf.getvalue()
+                data = res.candidates[0].content.parts[0].inline_data.data
+                if data[:4] == b"RIFF":  # הבקשה מחזירה כבר קובץ WAV שלם
+                    return data
+                buf = io.BytesIO()
+                w = wave.open(buf, "wb")
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(data)
+                w.close()
+                return buf.getvalue()
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                print(f"tts {name} style={with_style} failed: {msg[:200]}", flush=True)
+                if any(x in msg for x in ("429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")):
+                    _mark_bad(name, e)
+                    break
+    raise last_err or RuntimeError("no tts model available")
 
 
 def upload_to_yemot(wav_bytes, name):
@@ -298,19 +336,17 @@ def wikipedia_lookup(query):
 
 
 def answer_from_text(question, info):
-    res = client.models.generate_content(
-        model=MODEL,
-        contents=f"שאלה: {question}\nמידע מוויקיפדיה: {info}\nענה על השאלה לפי המידע.",
-        config=types.GenerateContentConfig(system_instruction=SHORT_PROMPT, max_output_tokens=300),
+    res = call_model(
+        f"שאלה: {question}\nמידע מוויקיפדיה: {info}\nענה על השאלה לפי המידע.",
+        types.GenerateContentConfig(system_instruction=SHORT_PROMPT, max_output_tokens=300),
     )
     return (res.text or "").strip()
 
 
 def web_lookup(question):
-    res = client.models.generate_content(
-        model=MODEL,
-        contents=question,
-        config=types.GenerateContentConfig(
+    res = call_model(
+        question,
+        types.GenerateContentConfig(
             system_instruction=SHORT_PROMPT,
             tools=[types.Tool(google_search=types.GoogleSearch())],
             max_output_tokens=400,
@@ -365,6 +401,7 @@ def ask_gemini(call_id, audio_bytes):
 
 def worker(call_id, recorded, phone=""):
     t0 = time.time()
+    failed = False
     try:
         audio = download_recording(recorded)
         print(f"timing: download {time.time() - t0:.1f}s, {len(audio)} bytes", flush=True)
@@ -387,9 +424,10 @@ def worker(call_id, recorded, phone=""):
         print("error:", e, flush=True)
         answer = "אירעה שגיאה נסה שוב"
         change_voice = False
+        failed = True
 
     audio_path = None
-    if VOICE_ENABLED:
+    if VOICE_ENABLED and not failed:
         with lock:
             st = calls.get(call_id)
             if st is not None and change_voice:
