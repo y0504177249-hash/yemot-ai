@@ -5,9 +5,13 @@ import wave
 import math
 import json
 import time
+import hmac
+import hashlib
+import functools
 import threading
+import collections
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, session, jsonify, send_file
 from google import genai
 from google.genai import types
 
@@ -44,8 +48,6 @@ ALLOWED_PHONES = [x.strip() for x in os.environ.get("ALLOWED_PHONES", "").split(
 ALLOW_ALL_PHONES = "*" in ALLOWED_PHONES
 
 
-def phone_allowed(phone):
-    return ALLOW_ALL_PHONES or phone in ALLOWED_PHONES
 
 # שליחה דרך ה-Gmail שלך באמצעות Google Apps Script (בלי שירות צד שלישי)
 MAIL_WEBHOOK_URL = os.environ.get("MAIL_WEBHOOK_URL", "").strip()
@@ -53,17 +55,19 @@ MAIL_WEBHOOK_SECRET = os.environ.get("MAIL_WEBHOOK_SECRET", "").strip()
 WEBHOOK_ENABLED = bool(MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET)
 EMAIL_ENABLED = bool(WEBHOOK_ENABLED or (BREVO_API_KEY and MAIL_FROM))
 
-EMAIL_PROMPT = (
-    " יש לך גישה לתיבת המייל של המשתמש. בפורמט ה-JSON אפשר להוסיף את השדות send_email, mail, confirm_pending (ברירת מחדל null). "
-    "כשמגדירים אחד מהם השאר answer ריק. "
-    "לשליחת מייל הגדר send_email={\"to\": \"שם איש קשר או שם אדם או כתובת מייל מלאה באותיות לועזיות\", \"subject\": \"נושא\", \"body\": \"תוכן\"}. "
-    "אל תשאל אישור בעצמך: השרת בודק את הכתובת, מקריא אותה ושואל את המשתמש. "
-    "אנשי קשר ידועים: " + (", ".join(MAIL_CONTACTS.keys()) or "אין") + ". "
-    "כשהמשתמש אומר כתובת מייל בקול, כתוב אותה בצורה תקנית (שטרודל הוא @ ונקודה היא .). "
-    "אם יש הערת מערכת שמייל ממתין לאישור: כן או אישור = confirm_pending=\"yes\", לא או ביטול = confirm_pending=\"no\", ובקשת שינוי = send_email חדש. "
-    "לקריאת מיילים הגדר mail={\"action\": \"search\", \"query\": \"שאילתת ג'ימייל\"}, למשל is:unread או from:דני או newer_than:1d או subject:חשבונית או in:inbox. "
-    "אחר כך אפשר לקרוא מייל מהרשימה האחרונה לפי מספר: mail={\"action\": \"read\", \"index\": 1, \"full\": false}. full=true רק אם ביקש להקריא את כל המייל."
-)
+def build_email_prompt(contacts):
+    return (
+        " יש לך גישה לתיבת המייל של המשתמש. בפורמט ה-JSON אפשר להוסיף את השדות send_email, mail, confirm_pending (ברירת מחדל null). "
+        "כשמגדירים אחד מהם השאר answer ריק. "
+        "לשליחת מייל הגדר send_email={\"to\": \"שם איש קשר או שם אדם או כתובת מייל מלאה באותיות לועזיות\", \"subject\": \"נושא\", \"body\": \"תוכן\"}. "
+        "אל תשאל אישור בעצמך: השרת בודק את הכתובת, מקריא אותה ושואל את המשתמש. "
+        "אנשי קשר ידועים: " + (", ".join(contacts.keys()) or "אין") + ". "
+        "כשהמשתמש אומר כתובת מייל בקול, כתוב אותה בצורה תקנית (שטרודל הוא @ ונקודה היא .). "
+        "אם יש הערת מערכת שמייל ממתין לאישור: כן או אישור = confirm_pending=\"yes\", לא או ביטול = confirm_pending=\"no\", ובקשת שינוי = send_email חדש. "
+        "לקריאת מיילים הגדר mail={\"action\": \"search\", \"query\": \"שאילתת ג'ימייל\"}, למשל is:unread או from:דני או newer_than:1d או subject:חשבונית או in:inbox. "
+        "אחר כך אפשר לקרוא מייל מהרשימה האחרונה לפי מספר: mail={\"action\": \"read\", \"index\": 1, \"full\": false}. full=true רק אם ביקש להקריא את כל המייל."
+    )
+
 
 # ---- קול טבעי (Gemini TTS) ----
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "1") == "1"
@@ -75,7 +79,7 @@ VOICE_PROMPT = (
     "וב-answer אמור שהחלפת קול. בכל מקרה אחר השדה change_voice הוא false."
 )
 
-SYSTEM_PROMPT = (
+BASE_PROMPT = (
     "אתה עוזר קולי בשיחת טלפון. המשתמש שולח הקלטה בעברית. "
     "החזר JSON בלבד בפורמט: {\"heard\": \"מה שהמשתמש אמר\", \"answer\": \"התשובה שלך\"}. "
     "התשובה בעברית, קצרה וברורה, עד שניים-שלושה משפטים, "
@@ -85,18 +89,185 @@ SYSTEM_PROMPT = (
 
 LOOKUP_PROMPT = (
     " אפשר לחפש מידע. בפורמט ה-JSON הוסף שדה lookup, ברירת מחדל null. "
-    "אם המשתמש אומר במפורש חפש באינטרנט, חפש ברשת, בדוק באינטרנט או בדוק מקורות, חובה להגדיר "
-    "lookup={\"type\": \"web\", \"query\": \"שאילתת חיפוש ממוקדת\"}. "
-    "לחדשות, מזג אוויר, מחירים, תוצאות ספורט וכל מידע עדכני הגדר גם כן lookup מסוג web. "
-    "לשאלות ידע כללי, אנשים, מקומות, מושגים והיסטוריה שאינן בקשת חיפוש מפורשת, אפשר להשתמש בוויקיפדיה. "
+    "לשאלות על ידע כללי, אנשים, מקומות, מושגים והיסטוריה הגדר "
+    "lookup={\"type\": \"wikipedia\", \"query\": \"שם הערך\"}. "
+    "לחדשות, מזג אוויר, מחירים, תוצאות ספורט ושאלות עדכניות הגדר "
+    "lookup={\"type\": \"web\", \"query\": \"מה לחפש\"}. "
     "כשמגדירים lookup השאר answer ריק. אל תחפש לשיחה רגילה או לשאלה שאתה יודע לענות עליה בביטחון."
 )
-SYSTEM_PROMPT += LOOKUP_PROMPT
-if VOICE_ENABLED:
-    SYSTEM_PROMPT += VOICE_PROMPT
 
-if EMAIL_ENABLED:
-    SYSTEM_PROMPT += EMAIL_PROMPT
+# ---------------- הגדרות שנשמרות וניתנות לעריכה מממשק הניהול ----------------
+CONFIG_FILE = os.environ.get("CONFIG_FILE", "/tmp/yemot_config.json")
+DEFAULT_GREETING = "שלום אני העוזר החכם שאל אותי כל שאלה ובסיום השאלה הקש סולמית"
+START_TIME = time.time()
+_store = {"settings": {}, "callers": {}, "loaded": 0.0, "source": "env", "error": "", "refreshing": False}
+_store_lock = threading.Lock()
+events = collections.deque(maxlen=100)
+
+
+def settings_defaults():
+    return {
+        "model": MODEL,
+        "voice_enabled": VOICE_ENABLED,
+        "default_voice": VOICES[0],
+        "music_file": MUSIC_FILE,
+        "mail_mode": "all" if ALLOW_ALL_PHONES else ("listed" if ALLOWED_PHONES else "off"),
+        "mail_contacts": MAIL_CONTACTS,
+        "greeting": DEFAULT_GREETING,
+        "extra_instructions": "",
+    }
+
+
+def cfg(name):
+    v = _store["settings"].get(name)
+    return settings_defaults()[name] if v is None else v
+
+
+def voice_on():
+    return bool(cfg("voice_enabled"))
+
+
+def caller(phone):
+    return _store["callers"].get(phone) or {}
+
+
+def all_keys():
+    keys = dict(GEMINI_KEYS)
+    for ph, c in _store["callers"].items():
+        if c.get("key"):
+            keys[ph] = c["key"]
+    return keys
+
+
+def phone_allowed(phone):
+    mode = cfg("mail_mode")
+    if mode == "all":
+        return True
+    if mode == "listed":
+        return phone in ALLOWED_PHONES or bool(caller(phone).get("mail"))
+    return False
+
+
+def default_voice_index():
+    try:
+        return VOICES.index(cfg("default_voice"))
+    except ValueError:
+        return 0
+
+
+def redact(text):
+    text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[מפתח]", str(text))
+    for k in list(all_keys().values()) + [GEMINI_API_KEY]:
+        if k and len(k) > 8:
+            text = text.replace(k, "[מפתח]")
+    return text
+
+
+_prompt_cache = {"key": None, "text": ""}
+
+
+def system_prompt():
+    contacts = cfg("mail_contacts")
+    extra = (cfg("extra_instructions") or "").strip()
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED)
+    if _prompt_cache["key"] != key:
+        text = BASE_PROMPT + LOOKUP_PROMPT
+        if voice_on():
+            text += VOICE_PROMPT
+        if EMAIL_ENABLED:
+            text += build_email_prompt(contacts)
+        if extra:
+            text += " הנחיות נוספות מהמשתמש: " + extra
+        _prompt_cache["key"] = key
+        _prompt_cache["text"] = text
+    return _prompt_cache["text"]
+
+
+def _read_local():
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_local():
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"settings": _store["settings"], "callers": _store["callers"]}, f, ensure_ascii=False)
+    except Exception as e:
+        print("local config write failed:", e, flush=True)
+
+
+def _store_error(e):
+    msg = str(e)
+    return "הסקריפט בגוגל עוד לא עודכן" if "unknown" in msg or "bad response" in msg else redact(msg)[:150]
+
+
+def refresh_store():
+    try:
+        if WEBHOOK_ENABLED:
+            res = mail_json({"action": "config_get"})
+            if not isinstance(res, dict) or ("settings" not in res and "callers" not in res):
+                raise RuntimeError("unknown")
+            data, source = res, "google"
+            if not (data.get("settings") or data.get("callers")):
+                local = _read_local()  # הועלה זמנית לפני עדכון הסקריפט: מעבירים לגוגל
+                if local.get("settings") or local.get("callers"):
+                    data = local
+                    for sec in ("settings", "callers"):
+                        try:
+                            mail_json({"action": "config_set", "section": sec, "value": local.get(sec) or {}})
+                        except Exception:
+                            pass
+        else:
+            data, source = _read_local(), "local"
+        with _store_lock:
+            _store["settings"] = data.get("settings") or {}
+            _store["callers"] = data.get("callers") or {}
+            _store["source"] = source
+            _store["error"] = ""
+    except Exception as e:
+        with _store_lock:
+            if not _store["loaded"]:
+                data = _read_local()
+                _store["settings"] = data.get("settings") or {}
+                _store["callers"] = data.get("callers") or {}
+            _store["source"] = "local"
+            _store["error"] = _store_error(e)
+    _store["loaded"] = time.time()
+
+
+def maybe_refresh():
+    if time.time() - _store["loaded"] > 30 and not _store["refreshing"]:
+        _store["refreshing"] = True
+
+        def run():
+            try:
+                refresh_store()
+            finally:
+                _store["refreshing"] = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+
+def persist(section, value):
+    # שומר בזיכרון, בקובץ מקומי ובחשבון הגוגל. מחזיר אזהרה אם השמירה הקבועה נכשלה
+    with _store_lock:
+        _store[section] = value
+    _write_local()
+    if WEBHOOK_ENABLED:
+        try:
+            res = mail_json({"action": "config_set", "section": section, "value": value})
+            if not (isinstance(res, dict) and res.get("ok")):
+                raise RuntimeError("unknown")
+            _store["source"] = "google"
+            _store["error"] = ""
+        except Exception as e:
+            _store["error"] = _store_error(e)
+            return "נשמר זמנית בלבד: השמירה הקבועה בגוגל נכשלה (" + _store["error"] + ")"
+    return ""
+
 
 app = Flask(__name__)
 
@@ -124,7 +295,7 @@ _tls = threading.local()
 
 
 def client_for(phone):
-    key = GEMINI_KEYS.get(phone)
+    key = all_keys().get(phone)
     if not key:
         return client
     if key not in _clients:
@@ -171,8 +342,9 @@ def read_command(prompt_text, call_id, turn):
 
 def wait_command():
     # מנגינת המתנה (או הודעה) ואז חזרה לשלוחה, שתבדוק אם התשובה מוכנה
-    if MUSIC_FILE:
-        return f"id_list_message=f-{MUSIC_FILE}&go_to_folder={EXTENSION_PATH}"
+    music = cfg("music_file")
+    if music:
+        return f"id_list_message=f-{music}&go_to_folder={EXTENSION_PATH}"
     return f"id_list_message=t-נא להמתין&go_to_folder={EXTENSION_PATH}"
 
 
@@ -227,8 +399,9 @@ def speak_email(addr):
 
 def resolve_recipient(to):
     # מחזיר רשימת מועמדים: [{"name":..., "email":...}]
-    if to in MAIL_CONTACTS:
-        return [{"name": to, "email": MAIL_CONTACTS[to]}]
+    contacts = cfg("mail_contacts")
+    if to in contacts:
+        return [{"name": to, "email": contacts[to]}]
     if EMAIL_RE.match(to):
         return [{"name": "", "email": to}]
     if WEBHOOK_ENABLED:
@@ -348,18 +521,31 @@ _bad_models = {}  # שם מודל -> זמן (epoch) שעד אליו מדלגים
 _discovered = {"done": False, "names": []}
 
 
+_bad_reason = {}
+
+
 def _mark_bad(name, err):
     msg = str(err)
     if "404" in msg or "NOT_FOUND" in msg:
-        _bad_models[_bk(name)] = time.time() + 86400  # לא קיים: יום שלם
+        until, reason = time.time() + 86400, "missing"  # לא קיים: יום שלם
     elif "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-        _bad_models[_bk(name)] = time.time() + 3600  # מכסה נגמרה: שעה
+        until, reason = time.time() + 3600, "quota"  # מכסה נגמרה: שעה
     else:
-        _bad_models[_bk(name)] = time.time() + 30
+        until, reason = time.time() + 30, "transient"
+    _bad_models[_bk(name)] = until
+    _bad_reason[_bk(name)] = reason
 
 
 def _is_bad(name):
     return _bad_models.get(_bk(name), 0) > time.time()
+
+
+def quota_state(keyid):
+    now = time.time()
+    primary = f"{keyid}:{cfg('model')}"
+    if _bad_models.get(primary, 0) > now and _bad_reason.get(primary) == "quota":
+        return "quota"
+    return "ok"
 
 
 def discover_models():
@@ -380,7 +566,8 @@ def discover_models():
 
 def call_model(contents, config):
     last_err = None
-    base = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
+    model = cfg("model")
+    base = [model] + [m for m in FALLBACK_MODELS if m != model]
     for stage in (0, 1):
         names = base if stage == 0 else [n for n in discover_models() if n not in base]
         for name in names:
@@ -406,7 +593,7 @@ def generate(contents):
     return call_model(
         contents,
         types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_prompt(),
             response_mime_type="application/json",
             max_output_tokens=400,
         ),
@@ -636,7 +823,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     data = json.loads(res.text)
     heard = (data.get("heard") or "").strip()
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
-    change_voice = bool(data.get("change_voice")) if VOICE_ENABLED else False
+    change_voice = bool(data.get("change_voice")) if voice_on() else False
     lookup = data.get("lookup")
     send = data.get("send_email")
     mail = data.get("mail")
@@ -645,6 +832,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     try:
         if EMAIL_ENABLED and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
             print(f"mail request from {phone or 'unknown'}", flush=True)
+            _tls.kind = "mail"
             if not phone_allowed(phone):
                 print("mail blocked: phone not allowed", flush=True)
                 answer = "אין לך הרשאה לגשת למיילים"
@@ -657,6 +845,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
                 answer = handle_mail(call_id, mail, heard)
                 print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
         elif isinstance(lookup, dict) and (lookup.get("query") or heard):
+            _tls.kind = "lookup"
             t = time.time()
             found = do_lookup(lookup, heard)
             print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
@@ -673,10 +862,13 @@ def ask_gemini(call_id, audio_bytes, phone=""):
 
 
 def worker(call_id, recorded, phone=""):
+    keys = all_keys()
     _tls.client = client_for(phone)
-    _tls.keyid = phone if phone in GEMINI_KEYS else "default"
+    _tls.keyid = phone if phone in keys else "default"
+    _tls.kind = "chat"
     t0 = time.time()
     failed = False
+    err = ""
     try:
         audio = download_recording(recorded)
         print(f"timing: download {time.time() - t0:.1f}s, {len(audio)} bytes", flush=True)
@@ -684,13 +876,14 @@ def worker(call_id, recorded, phone=""):
         answer, change_voice = ask_gemini(call_id, audio, phone)
         print(f"timing: gemini {time.time() - t1:.1f}s", flush=True)
     except Exception as e:
-        print("error:", e, flush=True)
+        print("error:", redact(e), flush=True)
         answer = "אירעה שגיאה נסה שוב"
         change_voice = False
         failed = True
+        err = redact(str(e))[:140]
 
     audio_path = None
-    if VOICE_ENABLED and not failed:
+    if voice_on() and not failed:
         with lock:
             st = calls.get(call_id)
             if st is not None and change_voice:
@@ -699,15 +892,19 @@ def worker(call_id, recorded, phone=""):
             turn = (st["turn"] + 1) if st is not None else 1
         try:
             t2 = time.time()
-            full_text = answer + ". לשאלה נוספת, פשוט דבר. אחרי כל שאלה הקש סולמית כדי לסיים את ההקלטה."
+            full_text = answer + ". לשאלה נוספת דבר, ובסיום הקש סולמית."
             wav = tts_wav(full_text, voice)
             name = "a" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(turn % 2)
             audio_path = upload_to_yemot(wav, name)
             print(f"timing: voice {voice} {time.time() - t2:.1f}s", flush=True)
         except Exception as e:
-            print("voice error:", e, flush=True)
+            print("voice error:", redact(e), flush=True)
             audio_path = None
 
+    events.appendleft({
+        "t": time.time(), "phone": phone or "?", "kind": getattr(_tls, "kind", "chat"),
+        "ok": not failed, "sec": round(time.time() - t0, 1), "voice": bool(audio_path), "err": err,
+    })
     with lock:
         st = calls.get(call_id)
         if st is not None:
@@ -727,6 +924,8 @@ def cleanup_old():
 def ivr():
     p = request.values
     call_id = p.get("ApiCallId", "unknown")
+    phone = p.get("ApiPhone", "")
+    maybe_refresh()
 
     if p.get("hangup") == "yes":
         with lock:
@@ -737,13 +936,18 @@ def ivr():
     if TEST_MODE:
         return Response("id_list_message=t-שלום זו בדיקה של המערכת", mimetype="text/plain")
 
+    if caller(phone).get("enabled") is False:
+        return Response("id_list_message=t-אין לך הרשאה להשתמש בשלוחה זו&go_to_folder=hangup", mimetype="text/plain")
+
     recorded_all = p.getlist("question")
     recorded = recorded_all[-1] if recorded_all else None
 
     with lock:
         cleanup_old()
         st = calls.setdefault(
-            call_id, {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0, "voice": 0, "audio": None}
+            call_id,
+            {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
+             "voice": default_voice_index(), "audio": None},
         )
         st["t"] = time.time()
 
@@ -752,16 +956,16 @@ def ivr():
             st["last"] = recorded
             st["status"] = "processing"
             st["started"] = time.time()
-            threading.Thread(target=worker, args=(call_id, recorded, p.get("ApiPhone", "")), daemon=True).start()
+            threading.Thread(target=worker, args=(call_id, recorded, phone), daemon=True).start()
             return Response(wait_command(), mimetype="text/plain")
 
-        # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-45 שניות
+        # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-70 שניות
         if st["status"] == "processing":
             if time.time() - st["started"] > 70:
                 st["status"] = "idle"
                 st["turn"] += 1
                 return Response(
-                    read_command("התשובה מתעכבת. נסה לשאול שוב, ואחרי השאלה הקש סולמית.", call_id, st["turn"]),
+                    read_command("התשובה מתעכבת נסה לשאול שוב ובסיום הקש סולמית", call_id, st["turn"]),
                     mimetype="text/plain",
                 )
             return Response(wait_command(), mimetype="text/plain")
@@ -774,16 +978,263 @@ def ivr():
                 fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(st["turn"])
                 cmd = f"read=f-{st['audio']}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
                 return Response(cmd, mimetype="text/plain")
-            text = st["answer"] + " לשאלה נוספת, פשוט דבר. אחרי כל שאלה הקש סולמית כדי לסיים את ההקלטה."
+            text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
             return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
 
         # כניסה ראשונה לשלוחה
-        return Response(
-            read_command(
-                "שלום, אני העוזר החכם. אפשר לשאול אותי כל שאלה. אחרי כל שאלה הקש סולמית כדי לסיים את ההקלטה.", call_id, st["turn"]
-            ),
-            mimetype="text/plain",
+        return Response(read_command(cfg("greeting") or DEFAULT_GREETING, call_id, st["turn"]), mimetype="text/plain")
+
+
+# ---------------- ממשק ניהול ----------------
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+app.secret_key = hashlib.sha256(
+    ("sess|" + ADMIN_PASSWORD + "|" + MAIL_WEBHOOK_SECRET + "|" + YEMOT_PASSWORD).encode("utf-8")
+).hexdigest()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    PERMANENT_SESSION_LIFETIME=12 * 3600,
+)
+ADMIN_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
+_login_fails = collections.deque()
+_ip_fails = {}
+
+
+@app.after_request
+def admin_headers(resp):
+    if request.path.startswith("/admin"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; "
+            "script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         )
+    return resp
+
+
+def client_ip():
+    xff = request.headers.get("X-Forwarded-For", "")
+    return (xff.split(",")[-1].strip() if xff else "") or (request.remote_addr or "?")
+
+
+def login_blocked(ip):
+    now = time.time()
+    while _login_fails and now - _login_fails[0] > 600:
+        _login_fails.popleft()
+    mine = [t for t in _ip_fails.get(ip, []) if now - t < 600]
+    _ip_fails[ip] = mine
+    return len(mine) >= 5 or len(_login_fails) >= 20
+
+
+def admin_required(f):
+    @functools.wraps(f)
+    def wrapper(*a, **k):
+        if not ADMIN_PASSWORD or not session.get("admin"):
+            return jsonify({"error": "נדרשת כניסה"}), 401
+        if request.method != "GET" and request.headers.get("X-Requested-With") != "admin":
+            return jsonify({"error": "בקשה לא תקינה"}), 403
+        return f(*a, **k)
+
+    return wrapper
+
+
+@app.route("/admin")
+@app.route("/admin/")
+def admin_page():
+    return send_file(ADMIN_HTML, mimetype="text/html")
+
+
+@app.route("/admin/api/whoami")
+def admin_whoami():
+    return jsonify({"enabled": bool(ADMIN_PASSWORD), "auth": bool(session.get("admin"))})
+
+
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    if request.headers.get("X-Requested-With") != "admin":
+        return jsonify({"error": "בקשה לא תקינה"}), 403
+    if not ADMIN_PASSWORD:
+        return jsonify({"error": "ממשק הניהול כבוי"}), 403
+    ip = client_ip()
+    if login_blocked(ip):
+        return jsonify({"error": "יותר מדי ניסיונות. נסה שוב בעוד כמה דקות"}), 429
+    pw = str((request.get_json(silent=True) or {}).get("password", ""))
+    if hmac.compare_digest(pw.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8")):
+        session.clear()
+        session["admin"] = True
+        session.permanent = True
+        return jsonify({"ok": True})
+    now = time.time()
+    _login_fails.append(now)
+    _ip_fails.setdefault(ip, []).append(now)
+    print("admin login failed", flush=True)
+    time.sleep(1)
+    return jsonify({"error": "הסיסמה שגויה"}), 401
+
+
+@app.route("/admin/api/logout", methods=["POST"])
+@admin_required
+def admin_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+def key_mask(k):
+    return ("••••" + k[-4:]) if k else ""
+
+
+@app.route("/admin/api/state")
+@admin_required
+def admin_state():
+    maybe_refresh()
+    now = time.time()
+    env_keys = dict(GEMINI_KEYS)
+    rows = []
+    for ph in sorted(set(_store["callers"]) | set(env_keys)):
+        c = _store["callers"].get(ph, {})
+        key = c.get("key") or env_keys.get(ph, "")
+        rows.append({
+            "phone": ph, "name": c.get("name", ""), "mask": key_mask(key),
+            "has_key": bool(c.get("key")), "from_env": bool(env_keys.get(ph)) and not c.get("key"),
+            "mail": bool(c.get("mail")), "enabled": c.get("enabled", True),
+            "state": quota_state(ph if key else "default"),
+        })
+    return jsonify({
+        "uptime": now - START_TIME,
+        "active_calls": sum(1 for x in calls.values() if now - x["t"] < 120),
+        "store": {"source": _store["source"], "error": _store["error"]},
+        "features": {"email": EMAIL_ENABLED, "webhook": WEBHOOK_ENABLED},
+        "settings": {k: cfg(k) for k in settings_defaults()},
+        "voices": VOICES,
+        "default_key": {"mask": key_mask(GEMINI_API_KEY), "state": quota_state("default")},
+        "callers": rows,
+        "events": list(events)[:60],
+    })
+
+
+@app.route("/admin/api/caller", methods=["PUT"])
+@admin_required
+def admin_caller_put():
+    d = request.get_json(silent=True) or {}
+    phone = str(d.get("phone", "")).strip()
+    if not re.fullmatch(r"\d{5,15}", phone):
+        return jsonify({"error": "מספר טלפון לא תקין (ספרות בלבד)"}), 400
+    key = str(d.get("key", "")).strip()
+    if key and not re.fullmatch(r"[A-Za-z0-9._-]{20,200}", key):
+        return jsonify({"error": "המפתח לא נראה תקין. העתק אותו שוב במלואו"}), 400
+    callers = {k: dict(v) for k, v in _store["callers"].items()}
+    if phone not in callers and len(callers) >= 40:
+        return jsonify({"error": "אי אפשר להוסיף יותר מ-40 קווים"}), 400
+    cur = callers.get(phone, {"enabled": True, "mail": False})
+    if "name" in d:
+        cur["name"] = str(d.get("name", "")).strip()[:40]
+    if key:
+        cur["key"] = key
+    if d.get("clear_key"):
+        cur.pop("key", None)
+    if "mail" in d:
+        cur["mail"] = bool(d["mail"])
+    if "enabled" in d:
+        cur["enabled"] = bool(d["enabled"])
+    callers[phone] = cur
+    return jsonify({"ok": True, "warning": persist("callers", callers)})
+
+
+@app.route("/admin/api/caller/<phone>", methods=["DELETE"])
+@admin_required
+def admin_caller_delete(phone):
+    callers = {k: dict(v) for k, v in _store["callers"].items()}
+    if phone not in callers:
+        return jsonify({"error": "הקו לא נמצא"}), 404
+    callers.pop(phone)
+    return jsonify({"ok": True, "warning": persist("callers", callers)})
+
+
+@app.route("/admin/api/settings", methods=["PUT"])
+@admin_required
+def admin_settings_put():
+    d = request.get_json(silent=True) or {}
+    out = {}
+    model = str(d.get("model", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,60}", model):
+        return jsonify({"error": "שם המודל לא תקין"}), 400
+    out["model"] = model
+    out["voice_enabled"] = bool(d.get("voice_enabled"))
+    voice = str(d.get("default_voice", ""))
+    if voice not in VOICES:
+        return jsonify({"error": "קול לא מוכר"}), 400
+    out["default_voice"] = voice
+    mode = str(d.get("mail_mode", ""))
+    if mode not in ("all", "listed", "off"):
+        return jsonify({"error": "הגדרת הגישה למיילים לא תקינה"}), 400
+    out["mail_mode"] = mode
+    contacts = d.get("mail_contacts") or {}
+    if not isinstance(contacts, dict) or len(contacts) > 50:
+        return jsonify({"error": "רשימת אנשי הקשר לא תקינה"}), 400
+    clean = {}
+    for k, v in contacts.items():
+        k, v = str(k).strip(), str(v).strip()
+        if not k or len(k) > 40 or not EMAIL_RE.match(v):
+            return jsonify({"error": "כתובת לא תקינה עבור " + k[:40]}), 400
+        clean[k] = v
+    out["mail_contacts"] = clean
+    music = str(d.get("music_file", "")).strip()
+    if music and not re.fullmatch(r"[/A-Za-z0-9._-]{1,100}", music):
+        return jsonify({"error": "נתיב המנגינה לא תקין"}), 400
+    out["music_file"] = music
+    greeting = str(d.get("greeting", "")).strip()
+    if len(greeting) > 300:
+        return jsonify({"error": "ברכת הפתיחה ארוכה מדי (עד 300 תווים)"}), 400
+    out["greeting"] = greeting or DEFAULT_GREETING
+    extra = str(d.get("extra_instructions", "")).strip()
+    if len(extra) > 600:
+        return jsonify({"error": "ההנחיות הנוספות ארוכות מדי (עד 600 תווים)"}), 400
+    out["extra_instructions"] = extra
+    new = dict(_store["settings"])
+    new.update(out)
+    return jsonify({"ok": True, "warning": persist("settings", new)})
+
+
+@app.route("/admin/api/test_key", methods=["POST"])
+@admin_required
+def admin_test_key():
+    d = request.get_json(silent=True) or {}
+    key = str(d.get("key", "")).strip()
+    phone = str(d.get("phone", "")).strip()
+    if not key:
+        key = all_keys().get(phone, "") if phone else GEMINI_API_KEY
+    if not key:
+        return jsonify({"ok": False, "error": "אין מפתח לבדיקה"})
+    try:
+        c = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=15000))
+        c.models.generate_content(
+            model=cfg("model"), contents="ענה במילה אחת: בדיקה",
+            config=types.GenerateContentConfig(max_output_tokens=20),
+        )
+        return jsonify({"ok": True})
+    except Exception as e:
+        msg = redact(str(e))
+        if "API_KEY_INVALID" in msg or "API key not valid" in msg:
+            msg = "המפתח לא תקין"
+        elif "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+            msg = "המפתח תקין, אבל המכסה שלו נגמרה"
+        elif "404" in msg:
+            msg = "המפתח כנראה תקין, אבל המודל שהוגדר לא קיים"
+        return jsonify({"ok": False, "error": msg[:200]})
+
+
+@app.route("/admin/api/reset_quota", methods=["POST"])
+@admin_required
+def admin_reset_quota():
+    _bad_models.clear()
+    _bad_reason.clear()
+    return jsonify({"ok": True})
+
+
+maybe_refresh()
 
 
 if __name__ == "__main__":
