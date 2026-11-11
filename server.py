@@ -334,6 +334,8 @@ def client_for(phone):
         except Exception as e:
             print("key pool assignment failed:", redact(e), flush=True)
             key = ""
+        if not key:
+            db_notify_key_pool_empty(phone)
     if not key:
         return client
     if key not in _clients:
@@ -376,6 +378,70 @@ def db_connect():
     except Exception as e:
         print("database connection failed:", redact(e), flush=True)
         return None
+
+
+def db_notify_key_pool_empty(phone):
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""CREATE TABLE IF NOT EXISTS admin_notifications (
+                    id BIGSERIAL PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    phone VARCHAR(30) NOT NULL DEFAULT '',
+                    message TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    resolved_at TIMESTAMPTZ
+                )""")
+                cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS admin_notifications_open_unique
+                    ON admin_notifications(kind, phone) WHERE resolved_at IS NULL""")
+                cur.execute("""INSERT INTO admin_notifications(kind, phone, message)
+                    VALUES ('key_pool_empty', %s, %s)
+                    ON CONFLICT (kind, phone) WHERE resolved_at IS NULL DO NOTHING""",
+                    (str(phone or '')[:30], 'אין מפתח Gemini פנוי להקצאה. יש להוסיף מפתח למאגר כדי להעניק למתקשר מכסה אישית.'))
+        return True
+    except Exception as e:
+        print("admin notification save failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
+
+
+def db_list_notifications():
+    conn = db_connect()
+    if conn is None:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, kind, phone, message, created_at
+                FROM admin_notifications WHERE resolved_at IS NULL
+                ORDER BY created_at DESC LIMIT 50""")
+            return [{"id": r[0], "kind": r[1], "phone": r[2], "message": r[3],
+                     "created_at": r[4].isoformat()} for r in cur.fetchall()]
+    except Exception as e:
+        print("admin notification list failed:", redact(e), flush=True)
+        return []
+    finally:
+        conn.close()
+
+
+def db_resolve_notification(notification_id):
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE admin_notifications SET resolved_at=now() WHERE id=%s AND resolved_at IS NULL",
+                            (notification_id,))
+                return cur.rowcount > 0
+    except Exception as e:
+        print("admin notification resolve failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
 
 
 def db_save_caller(phone, profile):
@@ -1049,6 +1115,52 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     return answer, change_voice
 
 
+def transcribe_caller_name(recorded, phone, use_yiddish):
+    _tls.yiddish = bool(use_yiddish)
+    _tls.record_path = "/1/1" if use_yiddish else "/8"
+    try:
+        audio = download_recording(recorded)
+        language_instruction = (
+            "האזן להקלטה והחזר רק את השם הפרטי ושם המשפחה של הדובר ביידיש, באותיות יידיש. "
+            "אם לא נאמר שם ברור, החזר בדיוק: לא ברור"
+            if use_yiddish else
+            "האזן להקלטה והחזר רק את השם הפרטי ושם המשפחה של הדובר בעברית. "
+            "אם לא נאמר שם ברור, החזר בדיוק: לא ברור"
+        )
+        result = call_model(
+            [types.Part.from_bytes(data=audio, mime_type="audio/wav"),
+             types.Part(text=language_instruction)],
+            types.GenerateContentConfig(max_output_tokens=60),
+        )
+        name = re.sub(r"[^0-9A-Za-z֐-׿'’ -]", "", (result.text or "")).strip()
+        name = " ".join(name.split())[:40]
+        if name and name.lower() != "לא ברור" and name != "לא ברור":
+            callers = {k: dict(v) for k, v in _store["callers"].items()}
+            profile = callers.get(phone, {"enabled": True, "mail": False})
+            profile["name"] = name
+            callers[phone] = profile
+            _caller_loaded.add(phone)
+            warning = persist("callers", callers)
+            if not db_save_caller(phone, profile):
+                print("caller name saved to profile store but not database", flush=True)
+            print("caller name captured for phone ending", phone[-4:], flush=True)
+            return name
+        return ""
+    except Exception as e:
+        print("caller name transcription failed:", redact(e), flush=True)
+        return ""
+
+
+def worker_name(call_id, recorded, phone, use_yiddish):
+    name = transcribe_caller_name(recorded, phone, use_yiddish)
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["name_status"] = "done"
+            st["name_recording"] = recorded
+            st["name_captured"] = bool(name)
+
+
 def worker(call_id, recorded, phone="", use_yiddish=None):
     keys = all_keys()
     _tls.client = client_for(phone)
@@ -1204,6 +1316,29 @@ def ivr():
                 return Response(cmd, mimetype="text/plain")
             text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
             return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
+
+            # First-time callers record their name once; it is saved against caller ID.
+        if phone and not caller(phone).get("name"):
+            if not st.get("name_prompted"):
+                st["name_prompted"] = True
+                prompt = ("כדי איך זאל דיך קענען דערקענען ווייטער, זאג ביטע דיין נאמען." if use_yiddish
+                          else "כדי שאוכל לזהות אותך בשיחות הבאות, אמור בבקשה את שמך המלא.")
+                name_file = "n" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
+                return Response(
+                    f"read=t-{clean_for_tts(prompt)}=question,no,record,{active_record_path()},{name_file},no,yes,no",
+                    mimetype="text/plain",
+                )
+            if st.get("name_status") == "processing":
+                return Response(wait_command(), mimetype="text/plain")
+            if st.get("name_status") == "done" and not st.get("name_question_prompted"):
+                st["last"] = st.get("name_recording")
+                st["name_question_prompted"] = True
+                prompt = ("א דאנק. וואס ווילסטו פרעגן?" if use_yiddish else "תודה. עכשיו אפשר לשאול את השאלה שלך.")
+                return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
+            if st.get("name_prompted") and recorded and recorded != st.get("name_recording") and not st.get("name_status"):
+                st["name_status"] = "processing"
+                threading.Thread(target=worker_name, args=(call_id, recorded, phone, use_yiddish), daemon=True).start()
+                return Response(wait_command(), mimetype="text/plain")
 
         # Personalized opening for returning callers, general invitation for first-time callers.
         return Response(read_command(st.get("opening_greeting") or cfg("greeting") or DEFAULT_GREETING, call_id, st["turn"]), mimetype="text/plain")
@@ -1516,6 +1651,7 @@ def admin_state():
         "voices": VOICES,
         "default_key": {"mask": key_mask(GEMINI_API_KEY), "state": quota_state("default")},
         "callers": rows,
+        "notifications": db_list_notifications(),
         "events": list(events)[:60],
     })
 
@@ -1576,6 +1712,14 @@ def admin_key_pool_update(key_id):
     except Exception as e:
         print('key pool update failed:', redact(e), flush=True)
         return jsonify({'error': 'עדכון המפתח נכשל'}), 503
+
+@app.route("/admin/api/notifications/<int:notification_id>", methods=["POST"])
+@admin_required
+def admin_notification_resolve(notification_id):
+    if not db_resolve_notification(notification_id):
+        return jsonify({"error": "לא ניתן לעדכן את ההתראה"}), 503
+    return jsonify({"ok": True})
+
 
 @app.route("/admin/api/database")
 @admin_required
