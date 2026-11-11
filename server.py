@@ -40,6 +40,9 @@ except Exception:
     GEMINI_KEYS = {}
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 YIDDISH_MODE = os.environ.get("YIDDISH_MODE", "0") == "1"
+
+def yiddish_mode():
+    return getattr(_tls, "yiddish", YIDDISH_MODE)
 # תיקייה לשמירת ההקלטות בימות המשיח
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
 # שלוחה שאליה חוזרים בזמן ההמתנה (השלוחה הזו)
@@ -192,24 +195,23 @@ def redact(text):
     return text
 
 
-_prompt_cache = {"key": None, "text": ""}
+_prompt_cache = {}
 
 
 def system_prompt():
     contacts = cfg("mail_contacts")
     extra = (cfg("extra_instructions") or "").strip()
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, YIDDISH_MODE)
-    if _prompt_cache["key"] != key:
-        text = (YIDDISH_BASE_PROMPT if YIDDISH_MODE else BASE_PROMPT) + LOOKUP_PROMPT
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode())
+    if key not in _prompt_cache:
+        text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT) + LOOKUP_PROMPT
         if voice_on():
             text += VOICE_PROMPT
         if EMAIL_ENABLED:
             text += build_email_prompt(contacts)
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
-        _prompt_cache["key"] = key
-        _prompt_cache["text"] = text
-    return _prompt_cache["text"]
+        _prompt_cache[key] = text
+    return _prompt_cache[key]
 
 
 def _read_local():
@@ -300,24 +302,25 @@ def persist(section, value):
 
 app = Flask(__name__)
 
-# הגדרה חד-פעמית לשלוחה 1.1 בימות, בהפעלה יזומה דרך משתנה סביבה
-if os.environ.get("CONFIGURE_YEMOT_EXTENSION") == "1":
-    try:
-        setup_response = requests.get(
-            "https://www.call2all.co.il/ym/api/UpdateExtension",
-            params={
-                "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
-                "path": "ivr2:1/1",
-                "type": "api",
-                "api_link": "https://yemot-smart-search.onrender.com/ivr",
-                "api_hangup_send": "yes",
-            },
-            timeout=20,
-        )
-        setup_response.raise_for_status()
-        print("Yemot 1.1 extension update:", setup_response.text[:500], flush=True)
-    except Exception as setup_error:
-        print("Yemot 1.1 extension update failed:", str(setup_error)[:300], flush=True)
+# הגדרה חד-פעמית של שתי השלוחות בימות: 1.1 יידיש, 8 עברית.
+if os.environ.get("CONFIGURE_YEMOT_LANGUAGE_EXTENSIONS") == "1":
+    for extension_path, language in (("ivr2:1/1", "yi"), ("ivr2:8", "he")):
+        try:
+            setup_response = requests.get(
+                "https://www.call2all.co.il/ym/api/UpdateExtension",
+                params={
+                    "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
+                    "path": extension_path,
+                    "type": "api",
+                    "api_link": f"https://yemot-smart-search.onrender.com/ivr?lang={language}",
+                    "api_hangup_send": "yes",
+                },
+                timeout=20,
+            )
+            setup_response.raise_for_status()
+            print(f"Yemot {extension_path} language={language} update:", setup_response.text[:500], flush=True)
+        except Exception as setup_error:
+            print(f"Yemot {extension_path} update failed:", str(setup_error)[:300], flush=True)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
 _clients = {}
 _tls = threading.local()
@@ -776,7 +779,7 @@ def tts_wav(text, voice):
         for with_style in (True, False):
             item = {"type": "text", "text": text}
             if with_style:
-                item["annotations"] = [{"type": "speech_metadata", "style": (YIDDISH_TTS_STYLE if YIDDISH_MODE else TTS_STYLE)}]
+                item["annotations"] = [{"type": "speech_metadata", "style": (YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE)}]
             try:
                 res = cur_client().interactions.create(
                     model=name,
@@ -945,7 +948,7 @@ def wikipedia_lookup(query):
 def answer_from_text(question, info):
     res = call_model(
         f"שאלה: {question}\nמידע מוויקיפדיה: {info}\nענה על השאלה לפי המידע.",
-        types.GenerateContentConfig(system_instruction=(YIDDISH_SHORT_PROMPT if YIDDISH_MODE else SHORT_PROMPT), max_output_tokens=300),
+        types.GenerateContentConfig(system_instruction=(YIDDISH_SHORT_PROMPT if yiddish_mode() else SHORT_PROMPT), max_output_tokens=300),
     )
     return (res.text or "").strip()
 
@@ -954,7 +957,7 @@ def web_lookup(question):
     res = call_model(
         question,
         types.GenerateContentConfig(
-            system_instruction=(YIDDISH_WEB_RESEARCH_PROMPT if YIDDISH_MODE else WEB_RESEARCH_PROMPT),
+            system_instruction=(YIDDISH_WEB_RESEARCH_PROMPT if yiddish_mode() else WEB_RESEARCH_PROMPT),
             tools=[types.Tool(google_search=types.GoogleSearch())],
             max_output_tokens=900,
         ),
@@ -1038,11 +1041,12 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     return answer, change_voice
 
 
-def worker(call_id, recorded, phone=""):
+def worker(call_id, recorded, phone="", use_yiddish=None):
     keys = all_keys()
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in keys else "default"
     _tls.kind = "chat"
+    _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
     t0 = time.time()
     failed = False
     err = ""
@@ -1103,6 +1107,9 @@ def ivr():
     p = request.values
     call_id = p.get("ApiCallId", "unknown")
     phone = p.get("ApiPhone", "")
+    requested_lang = (p.get("lang") or "").strip().lower()
+    use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
+    _tls.yiddish = use_yiddish
     maybe_refresh()
     db_load_caller(phone)
 
@@ -1142,7 +1149,7 @@ def ivr():
                     history.append(types.Content(role="model", parts=[types.Part(text=old_answer)]))
             history[:] = history[-12:]
             _history_loaded.add(call_id)
-        if YIDDISH_MODE:
+        if use_yiddish:
             st.setdefault("opening_greeting", (
                 "שלום! לעצטע מאל האבן מיר גערעדט וועגן " + previous_topic + ". איך פריי זיך ממשיך צו רעדן מיט דיר. וואס ווילסטו היינט רעדן?"
                 if previous_topic else
@@ -1161,7 +1168,7 @@ def ivr():
             st["last"] = recorded
             st["status"] = "processing"
             st["started"] = time.time()
-            threading.Thread(target=worker, args=(call_id, recorded, phone), daemon=True).start()
+            threading.Thread(target=worker, args=(call_id, recorded, phone, use_yiddish), daemon=True).start()
             return Response(wait_command(), mimetype="text/plain")
 
         # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-70 שניות
