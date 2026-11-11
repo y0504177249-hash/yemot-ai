@@ -369,6 +369,30 @@ def db_save_caller(phone, profile):
         conn.close()
 
 
+def db_load_caller(phone):
+    if not phone:
+        return
+    conn = db_connect()
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT display_name, enabled FROM caller_profiles WHERE phone = %s",
+                (phone,),
+            )
+            row = cur.fetchone()
+        if row:
+            current = dict(_store["callers"].get(phone) or {})
+            current["name"] = row[0] or current.get("name", "")
+            current["enabled"] = bool(row[1])
+            _store["callers"][phone] = current
+    except Exception as e:
+        print("database caller load failed:", redact(e), flush=True)
+    finally:
+        conn.close()
+
+
 def db_load_history(phone):
     conn = db_connect()
     if conn is None:
@@ -1019,6 +1043,7 @@ def ivr():
     call_id = p.get("ApiCallId", "unknown")
     phone = p.get("ApiPhone", "")
     maybe_refresh()
+    db_load_caller(phone)
 
     if p.get("hangup") == "yes":
         with lock:
