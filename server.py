@@ -195,14 +195,14 @@ def redact(text):
     return text
 
 
-_prompt_cache = {"key": None, "text": ""}
+_prompt_cache = {}
 
 
 def system_prompt():
     contacts = cfg("mail_contacts")
     extra = (cfg("extra_instructions") or "").strip()
     key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode())
-    if _prompt_cache["key"] != key:
+    if key not in _prompt_cache:
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT) + LOOKUP_PROMPT
         if voice_on():
             text += VOICE_PROMPT
@@ -210,9 +210,8 @@ def system_prompt():
             text += build_email_prompt(contacts)
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
-        _prompt_cache["key"] = key
-        _prompt_cache["text"] = text
-    return _prompt_cache["text"]
+        _prompt_cache[key] = text
+    return _prompt_cache[key]
 
 
 def _read_local():
