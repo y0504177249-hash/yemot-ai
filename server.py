@@ -218,7 +218,7 @@ def redact(text):
         if secret and len(secret) >= 6:
             text = text.replace(secret, "[סוד]")
     # Hide credentials that appear as query/form parameters in HTTP exceptions.
-    text = re.sub(r"(?i)(token|password|secret|api[_-]?key)=([^& \t\r\n'"]+)", r"\1=[מוסתר]", text)
+    text = re.sub(r'(?i)(token|password|secret|api[_-]?key)=([^&\s]+)', r'\1=[מוסתר]', text)
     return text
 
 
