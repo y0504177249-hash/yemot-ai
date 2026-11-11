@@ -356,7 +356,22 @@
         h('tbody', null, rows))) : h('p', { class: 'sub', style: 'margin-top:10px' }, 'עוד אין שיחות מאז הפעלת השרת. חייג למספר והקש 8.'));
   }
 
-  function render() { app.replaceChildren(header(), callersPanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
+  function databasePanel() {
+    var box = h('section', null,
+      h('h2', null, 'חיבור למסד הנתונים'),
+      h('p', { class: 'sub' }, 'בדיקת חיבור ושמירת נתונים ב-Neon.'),
+      h('div', { class: 'bar' }, h('button', { class: 'quiet', onclick: check }, 'בדיקת חיבור')));
+    function check() {
+      box.querySelector('.sub').textContent = 'בודק חיבור...';
+      api('GET', 'database').then(function (d) {
+        box.querySelector('.sub').textContent = 'מחובר. פרופילי מתקשרים: ' + d.caller_profiles + '. תמלילים: ' + d.transcripts + '. בדיקה: ' + new Date(d.checked_at).toLocaleString('he-IL');
+      }).catch(function (e) { box.querySelector('.sub').textContent = 'בדיקת החיבור נכשלה: ' + e.message; });
+    }
+    check();
+    return box;
+  }
+
+  function render() { app.replaceChildren(header(), callersPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
   function load() {
     return api('GET', 'state').then(function (j) { S = j; render(); }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
