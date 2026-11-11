@@ -313,7 +313,7 @@
       if (name.value.trim()) q.set('name', name.value.trim());
       if (from.value) q.set('from', from.value);
       if (to.value) q.set('to', to.value);
-      q.set('limit', '100');
+      q.set('limit', '1000');
       api('GET', 'transcripts?' + q.toString()).then(function (data) {
         results.replaceChildren();
         if (!data.items.length) { results.append(h('p', { class: 'sub' }, 'לא נמצאו תמלולים מתאימים.')); return; }
@@ -359,7 +359,7 @@
     });
     return h('section', null,
       h('h2', null, 'שיחות אחרונות'),
-      h('p', { class: 'sub' }, 'נשמרים רק זמן, מספר, סוג ותוצאה. תוכן השיחות לא נשמר.'),
+      h('p', { class: 'sub' }, 'בארכיון נשמרים תמלילי חילופי הדברים בין המתקשר לעוזר, לצד פרטי השיחה.'),
       rows.length ? h('div', { class: 'scroll' }, h('table', null,
         h('thead', null, h('tr', null, ['זמן', 'מספר', 'סוג', 'משך', 'תוצאה'].map(function (x) { return h('th', null, x); }))),
         h('tbody', null, rows))) : h('p', { class: 'sub', style: 'margin-top:10px' }, 'עוד אין שיחות מאז הפעלת השרת. חייג למספר והקש 8.'));
