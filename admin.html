@@ -186,6 +186,7 @@
     kids.push(h('div', { class: 'bar' },
       h('button', { class: 'quiet', onclick: function () { say('מרענן...'); load().then(function () { say('עודכן'); }); } }, 'רענון'),
       h('button', { class: 'quiet', onclick: function () { act('מאפס מכסות', function () { return api('POST', 'reset_quota'); }); } }, 'איפוס סימוני מכסה'),
+      h('a', { href: '/admin/yiddish', style: 'display:inline-flex;align-items:center;text-decoration:none;border:1px solid var(--rule);border-radius:8px;padding:8px 14px;min-height:40px;color:var(--ink)' }, 'שיחה ביידיש'),
       h('span', { class: 'grow' }),
       h('button', { class: 'quiet', onclick: function () { api('POST', 'logout').then(function () { showLogin(); }); } }, 'יציאה')));
     kids.push(note);
