@@ -20,6 +20,7 @@ except ImportError:
 from flask import Flask, request, Response, session, jsonify, send_file
 from google import genai
 from google.genai import types
+from cryptography.fernet import Fernet
 try:
     from google.oauth2 import id_token as google_id_token
     from google.auth.transport import requests as google_auth_requests
@@ -1143,6 +1144,7 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_ADMIN_EMAIL = os.environ.get("GOOGLE_ADMIN_EMAIL", "y0504177249@gmail.com").strip().lower()
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
 GOOGLE_LOGIN_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI and google_id_token and google_auth_requests)
+GEMINI_KEY_ENCRYPTION_KEY = os.environ.get("GEMINI_KEY_ENCRYPTION_KEY", "").strip()
 
 
 def admin_auth_enabled():
@@ -1302,6 +1304,42 @@ def admin_logout():
     return jsonify({"ok": True})
 
 
+def key_cipher():
+    if not GEMINI_KEY_ENCRYPTION_KEY:
+        raise RuntimeError('מפתח הצפנה חסר')
+    return Fernet(GEMINI_KEY_ENCRYPTION_KEY.encode('ascii'))
+
+def key_pool_list():
+    conn = db_connect()
+    if conn is None: raise RuntimeError('מסד הנתונים אינו מחובר')
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT id, label, key_fingerprint, assigned_phone, created_at, assigned_at, disabled FROM gemini_key_pool ORDER BY id DESC')
+            return cur.fetchall()
+    finally: conn.close()
+
+def key_pool_add(label, key):
+    conn = db_connect()
+    if conn is None: raise RuntimeError('מסד הנתונים אינו מחובר')
+    encrypted = key_cipher().encrypt(key.encode('utf-8')).decode('ascii')
+    fingerprint = hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute('INSERT INTO gemini_key_pool (label, encrypted_key, key_fingerprint) VALUES (%s,%s,%s) ON CONFLICT (key_fingerprint) DO NOTHING RETURNING id', (label[:80], encrypted, fingerprint))
+                return bool(cur.fetchone())
+    finally: conn.close()
+
+def key_pool_disable(key_id, disabled):
+    conn = db_connect()
+    if conn is None: raise RuntimeError('מסד הנתונים אינו מחובר')
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE gemini_key_pool SET disabled=%s WHERE id=%s', (bool(disabled), key_id))
+                return cur.rowcount > 0
+    finally: conn.close()
+
 def key_mask(k):
     return ("••••" + k[-4:]) if k else ""
 
@@ -1366,6 +1404,31 @@ def admin_caller_put():
         warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נשמרו במסד הנתונים"
     return jsonify({"ok": True, "warning": warning})
 
+
+@app.route("/admin/api/key_pool", methods=["POST"])
+@admin_required
+def admin_key_pool_add():
+    d = request.get_json(silent=True) or {}
+    key = str(d.get('key', '')).strip().replace(' ', '').replace(chr(10), '').replace(chr(13), '')
+    label = str(d.get('label', '')).strip()[:80]
+    if not re.fullmatch(r'[A-Za-z0-9._-]{20,200}', key): return jsonify({'error': 'מפתח Gemini לא תקין'}), 400
+    try:
+        if not key_pool_add(label, key): return jsonify({'error': 'המפתח כבר קיים'}), 409
+        return jsonify({'ok': True})
+    except Exception as e:
+        print('key pool add failed:', redact(e), flush=True)
+        return jsonify({'error': 'שמירת המפתח נכשלה. בדוק חיבור והצפנה.'}), 503
+
+@app.route("/admin/api/key_pool/<int:key_id>", methods=["PUT"])
+@admin_required
+def admin_key_pool_update(key_id):
+    d = request.get_json(silent=True) or {}
+    try:
+        if not key_pool_disable(key_id, d.get('disabled')): return jsonify({'error': 'המפתח לא נמצא'}), 404
+        return jsonify({'ok': True})
+    except Exception as e:
+        print('key pool update failed:', redact(e), flush=True)
+        return jsonify({'error': 'עדכון המפתח נכשל'}), 503
 
 @app.route("/admin/api/database")
 @admin_required
