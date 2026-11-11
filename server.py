@@ -12,6 +12,10 @@ import functools
 import threading
 import collections
 import requests
+try:
+    import psycopg
+except ImportError:
+    psycopg = None
 from flask import Flask, request, Response, session, jsonify, send_file
 from google import genai
 from google.genai import types
@@ -20,6 +24,7 @@ from google.genai import types
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 # מפתח Gemini נפרד לכל מתקשר (לפי מספר טלפון), כדי שלכל אדם תהיה מכסה משלו. למשל {"0501234567": "AIza..."}
 try:
     GEMINI_KEYS = json.loads(os.environ.get("GEMINI_KEYS", "{}"))
@@ -327,6 +332,86 @@ def ping():
 histories = {}
 calls = {}  # call_id -> {"turn": int, "last": str, "status": "idle|processing", "answer": str, "t": float}
 lock = threading.Lock()
+_history_loaded = set()
+
+
+def db_connect():
+    if not DATABASE_URL or psycopg is None:
+        return None
+    try:
+        return psycopg.connect(DATABASE_URL, connect_timeout=5)
+    except Exception as e:
+        print("database connection failed:", redact(e), flush=True)
+        return None
+
+
+def db_save_caller(phone, profile):
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO caller_profiles (phone, display_name, enabled, updated_at)
+                       VALUES (%s, %s, %s, now())
+                       ON CONFLICT (phone) DO UPDATE SET
+                         display_name = EXCLUDED.display_name,
+                         enabled = EXCLUDED.enabled,
+                         updated_at = now()""",
+                    (phone, profile.get("name", ""), profile.get("enabled", True)),
+                )
+        return True
+    except Exception as e:
+        print("database caller save failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
+
+
+def db_load_history(phone):
+    conn = db_connect()
+    if conn is None:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT heard, answer FROM call_transcripts
+                   WHERE phone = %s ORDER BY created_at DESC, id DESC LIMIT 6""",
+                (phone,),
+            )
+            rows = cur.fetchall()
+        return list(reversed(rows))
+    except Exception as e:
+        print("database history load failed:", redact(e), flush=True)
+        return []
+    finally:
+        conn.close()
+
+
+def db_save_transcript(call_id, phone, heard, answer):
+    if not DATABASE_URL or not phone or not heard:
+        return False
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        profile = caller(phone)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO call_transcripts
+                       (call_id, phone, caller_name, heard, answer)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (str(call_id)[:200], phone[:30], profile.get("name", "")[:40],
+                     heard[:5000], answer[:5000]),
+                )
+        return True
+    except Exception as e:
+        print("database transcript save failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
 
 
 def clean_for_tts(text):
@@ -811,6 +896,13 @@ def do_lookup(lookup, heard):
 
 def ask_gemini(call_id, audio_bytes, phone=""):
     history = histories.setdefault(call_id, [])
+    if phone and phone not in _history_loaded:
+        for heard_old, answer_old in db_load_history(phone):
+            if heard_old:
+                history.append(types.Content(role="user", parts=[types.Part(text=heard_old)]))
+                history.append(types.Content(role="model", parts=[types.Part(text=answer_old)]))
+        history[:] = history[-12:]
+        _history_loaded.add(phone)
     parts = [types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")]
     with lock:
         st0 = calls.get(call_id)
@@ -857,6 +949,8 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
         history.append(types.Content(role="model", parts=[types.Part(text=answer)]))
         history[:] = history[-12:]
+        if phone:
+            db_save_transcript(call_id, phone, heard, answer)
     return answer, change_voice
 
 
@@ -1139,7 +1233,54 @@ def admin_caller_put():
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
-    return jsonify({"ok": True, "warning": persist("callers", callers)})
+    warning = persist("callers", callers)
+    if not db_save_caller(phone, cur) and DATABASE_URL:
+        warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נשמרו במסד הנתונים"
+    return jsonify({"ok": True, "warning": warning})
+
+
+@app.route("/admin/api/transcripts")
+@admin_required
+def admin_transcripts():
+    phone = re.sub(r"[^0-9]", "", request.args.get("phone", ""))[:15]
+    name = request.args.get("name", "").strip()[:40]
+    date_from = request.args.get("from", "").strip()
+    date_to = request.args.get("to", "").strip()
+    try:
+        limit = min(200, max(1, int(request.args.get("limit", "100"))))
+    except ValueError:
+        limit = 100
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        clauses, params = [], []
+        if phone:
+            clauses.append("phone = %s"); params.append(phone)
+        if name:
+            clauses.append("caller_name ILIKE %s"); params.append("%" + name + "%")
+        if date_from:
+            clauses.append("created_at >= %s::date"); params.append(date_from)
+        if date_to:
+            clauses.append("created_at < (%s::date + interval '1 day')"); params.append(date_to)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, call_id, phone, caller_name, created_at, heard, answer FROM call_transcripts"
+                + where + " ORDER BY created_at DESC LIMIT %s",
+                params + [limit],
+            )
+            rows = cur.fetchall()
+        return jsonify({"items": [
+            {"id": r[0], "call_id": r[1], "phone": r[2], "name": r[3],
+             "created_at": r[4].isoformat(), "heard": r[5], "answer": r[6]}
+            for r in rows
+        ]})
+    except Exception as e:
+        print("transcript search failed:", redact(e), flush=True)
+        return jsonify({"error": "לא ניתן לחפש בארכיון כרגע"}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/admin/api/caller/<phone>", methods=["DELETE"])
