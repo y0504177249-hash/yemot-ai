@@ -1390,7 +1390,16 @@ def admin_state():
             "mail": bool(c.get("mail")), "enabled": c.get("enabled", True),
             "state": quota_state(ph if key else "default"),
         })
+    try:
+        pool_rows = key_pool_list()
+        key_pool = [{"id": x[0], "label": x[1], "fingerprint": x[2], "assigned_phone": x[3],
+                     "created_at": x[4].isoformat(), "assigned_at": x[5].isoformat() if x[5] else None,
+                     "disabled": x[6]} for x in pool_rows]
+        key_pool_error = ""
+    except Exception as e:
+        key_pool, key_pool_error = [], str(e)[:100]
     return jsonify({
+        "key_pool": key_pool, "key_pool_error": key_pool_error,
         "uptime": now - START_TIME,
         "active_calls": sum(1 for x in calls.values() if now - x["t"] < 120),
         "store": {"source": _store["source"], "error": _store["error"]},
