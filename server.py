@@ -39,6 +39,7 @@ try:
 except Exception:
     GEMINI_KEYS = {}
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+YIDDISH_MODE = os.environ.get("YIDDISH_MODE", "0") == "1"
 # תיקייה לשמירת ההקלטות בימות המשיח
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
 # שלוחה שאליה חוזרים בזמן ההמתנה (השלוחה הזו)
@@ -91,6 +92,20 @@ VOICES = ["Sulafat", "Vindemiatrix", "Achernar", "Achird", "Algieba", "Gacrux", 
 VOICE_PROMPT = (
     " כשהמשתמש מבקש להחליף קול (למשל החלף קול), הגדר בפורמט ה-JSON את השדה change_voice=true, "
     "וב-answer אמור שהחלפת קול. בכל מקרה אחר השדה change_voice הוא false."
+)
+
+YIDDISH_BASE_PROMPT = (
+    "דו ביסט א פריינדלעכער, קלוגער שטימע־אסיסטענט. דער באנוצער רעדט יידיש. "
+    "הער גוט אויס די רעקארדירונג, שרייב אויף וואס ער האט געזאגט אין יידיש, און ענטפער אין נאטירלעכער, פשוטער, היינטצייטיקער גערעדטער יידיש. "
+    "נישט קיין ספרותדיקע יידיש, נישט איבערגיין אויף העברעיש אדער ענגליש. ניץ די געוויינטלעכע יידישע אותיות. "
+    "ענטפער קורץ און קלאר, געווענליך צוויי ביז דריי זאצן. גיב בלויז JSON אין דעם פארמאט: "
+    "{\"heard\": \"די ווערטער פונעם באנוצער אין יידיש\", \"answer\": \"דיין ענטפער אין יידיש\"}. "
+    "אויב די רעקארדירונג איז נישט קלאר, לאז heard ליידיג און בעט דעם באנוצער איבערצוזאגן."
+)
+
+YIDDISH_CHAT_PROMPT = (
+    "דו ביסט א ווארעמער, קלוגער שמועס־שותף. רעד מיטן באנוצער אין נאטירלעכער, פשוטער, היינטצייטיקער גערעדטער יידיש. "
+    "נישט קיין ספרותדיקע יידיש, נישט איבערגיין אויף העברעיש אדער ענגליש. ניץ יידישע אותיות."
 )
 
 BASE_PROMPT = (
@@ -183,9 +198,9 @@ _prompt_cache = {"key": None, "text": ""}
 def system_prompt():
     contacts = cfg("mail_contacts")
     extra = (cfg("extra_instructions") or "").strip()
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED)
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, YIDDISH_MODE)
     if _prompt_cache["key"] != key:
-        text = BASE_PROMPT + LOOKUP_PROMPT
+        text = (YIDDISH_BASE_PROMPT if YIDDISH_MODE else BASE_PROMPT) + LOOKUP_PROMPT
         if voice_on():
             text += VOICE_PROMPT
         if EMAIL_ENABLED:
@@ -750,6 +765,7 @@ def generate(contents):
 
 TTS_MODELS = [TTS_MODEL] if TTS_MODEL else ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"]
 TTS_STYLE = "A warm, gentle, calming and reassuring voice, soft and friendly, speaking Hebrew clearly at a relaxed slightly slow pace, with natural pauses and a soothing conversational tone. Never rushed, sharp, or overly theatrical."
+YIDDISH_TTS_STYLE = "A warm, gentle, natural conversational Yiddish-speaking voice. Speak fluent everyday Yiddish clearly, at a relaxed pace, with authentic Yiddish pronunciation and natural pauses."
 
 
 def tts_wav(text, voice):
@@ -760,7 +776,7 @@ def tts_wav(text, voice):
         for with_style in (True, False):
             item = {"type": "text", "text": text}
             if with_style:
-                item["annotations"] = [{"type": "speech_metadata", "style": TTS_STYLE}]
+                item["annotations"] = [{"type": "speech_metadata", "style": (YIDDISH_TTS_STYLE if YIDDISH_MODE else TTS_STYLE)}]
             try:
                 res = cur_client().interactions.create(
                     model=name,
@@ -887,6 +903,12 @@ if MUSIC_FILE:
 
 WIKI_HEADERS = {"User-Agent": "YemotAIAssistant/1.0 (personal phone assistant)"}
 SHORT_PROMPT = "ענה בעברית בשניים עד שלושה משפטים קצרים, בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים."
+YIDDISH_SHORT_PROMPT = "ענטפער אין צוויי ביז דריי קורצע זאצן אין נאטירלעכער, גערעדטער יידיש. ניץ יידישע אותיות."
+YIDDISH_WEB_RESEARCH_PROMPT = (
+    "פיר א גוטן פארשונג באזירט אויף Google Search רעזולטאטן. פארגלייך פארלעסלעכע מקורות. "
+    "ענטפער אין נאטירלעכער, פשוטער גערעדטער יידיש, מיט די וויכטיקסטע פרטים און א קלארער מסקנא. "
+    "אויב עס איז נישט גענוג אינפארמאציע, זאג דאס אפן און ערפינד נישט."
+)
 WEB_RESEARCH_PROMPT = (
     "בצע מחקר יסודי על סמך תוצאות Google Search. חפש כמה היבטים של השאלה והצלב מידע בין כמה מקורות אמינים ועצמאיים כשאפשר. "
     "העדף מקורות רשמיים, מחקרים וגופי חדשות מוכרים; בדוק תאריכים והבחן בין עובדות, הערכות ודעות. "
@@ -923,7 +945,7 @@ def wikipedia_lookup(query):
 def answer_from_text(question, info):
     res = call_model(
         f"שאלה: {question}\nמידע מוויקיפדיה: {info}\nענה על השאלה לפי המידע.",
-        types.GenerateContentConfig(system_instruction=SHORT_PROMPT, max_output_tokens=300),
+        types.GenerateContentConfig(system_instruction=(YIDDISH_SHORT_PROMPT if YIDDISH_MODE else SHORT_PROMPT), max_output_tokens=300),
     )
     return (res.text or "").strip()
 
@@ -932,7 +954,7 @@ def web_lookup(question):
     res = call_model(
         question,
         types.GenerateContentConfig(
-            system_instruction=WEB_RESEARCH_PROMPT,
+            system_instruction=(YIDDISH_WEB_RESEARCH_PROMPT if YIDDISH_MODE else WEB_RESEARCH_PROMPT),
             tools=[types.Tool(google_search=types.GoogleSearch())],
             max_output_tokens=900,
         ),
@@ -1120,11 +1142,18 @@ def ivr():
                     history.append(types.Content(role="model", parts=[types.Part(text=old_answer)]))
             history[:] = history[-12:]
             _history_loaded.add(call_id)
-        st.setdefault("opening_greeting", (
-            "שלום, בפעם הקודמת דיברנו על " + previous_topic + ". שמח להמשיך איתך. על מה תרצה לדבר היום?"
-            if previous_topic else
-            "שלום, אני פתוח לדבר איתך על כל נושא שבעולם. על מה תרצה לדבר?"
-        ))
+        if YIDDISH_MODE:
+            st.setdefault("opening_greeting", (
+                "שלום! לעצטע מאל האבן מיר גערעדט וועגן " + previous_topic + ". איך פריי זיך ממשיך צו רעדן מיט דיר. וואס ווילסטו היינט רעדן?"
+                if previous_topic else
+                "שלום! איך בין אפן צו רעדן מיט דיר וועגן יעדן נושא אויף דער וועלט. וועגן וואס ווילסטו רעדן?"
+            ))
+        else:
+            st.setdefault("opening_greeting", (
+                "שלום, בפעם הקודמת דיברנו על " + previous_topic + ". שמח להמשיך איתך. על מה תרצה לדבר היום?"
+                if previous_topic else
+                "שלום, אני פתוח לדבר איתך על כל נושא שבעולם. על מה תרצה לדבר?"
+            ))
         st["t"] = time.time()
 
         # הקלטה חדשה שעדיין לא טופלה: מתחילים עיבוד ברקע ומשמיעים המתנה
@@ -1390,6 +1419,48 @@ def key_pool_disable(key_id, disabled):
 
 def key_mask(k):
     return ("••••" + k[-4:]) if k else ""
+
+
+YIDDISH_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yiddish.html")
+
+
+@app.route("/admin/yiddish")
+@admin_required
+def admin_yiddish_page():
+    return send_file(YIDDISH_HTML, mimetype="text/html")
+
+
+@app.route("/admin/api/yiddish/chat", methods=["POST"])
+@admin_required
+def admin_yiddish_chat():
+    d = request.get_json(silent=True) or {}
+    message = str(d.get("message", "")).strip()
+    history_in = d.get("history") or []
+    if not message or len(message) > 2000 or not isinstance(history_in, list):
+        return jsonify({"error": "שרייב א קורצע שאלה אין יידיש"}), 400
+    contents = []
+    for item in history_in[-10:]:
+        if not isinstance(item, dict) or item.get("role") not in ("user", "model"):
+            continue
+        txt = str(item.get("text", "")).strip()[:1500]
+        if txt:
+            contents.append(types.Content(role=item["role"], parts=[types.Part(text=txt)]))
+    contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+    try:
+        result = call_model(contents, types.GenerateContentConfig(system_instruction=YIDDISH_CHAT_PROMPT, max_output_tokens=600))
+        answer = (result.text or "").strip()
+        if not answer:
+            raise RuntimeError("empty response")
+        audio = ""
+        try:
+            wav = tts_wav(answer, cfg("default_voice"))
+            audio = base64.b64encode(wav).decode("ascii")
+        except Exception as e:
+            print("Yiddish web TTS failed:", redact(e), flush=True)
+        return jsonify({"answer": answer, "audio": audio})
+    except Exception as e:
+        print("Yiddish web chat failed:", redact(e), flush=True)
+        return jsonify({"error": "דער שמועס איז יעצט נישט געלונגען. פרוביר נאכאמאל."}), 503
 
 
 @app.route("/admin/api/state")
