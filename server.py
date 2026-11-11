@@ -141,7 +141,6 @@ LOOKUP_PROMPT = (
 
 # ---------------- הגדרות שנשמרות וניתנות לעריכה מממשק הניהול ----------------
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "/tmp/yemot_config.json")
-DEFAULT_GREETING = "שלום אני העוזר החכם שאל אותי כל שאלה ובסיום השאלה הקש סולמית"
 START_TIME = time.time()
 _store = {"settings": {}, "callers": {}, "loaded": 0.0, "source": "env", "error": "", "refreshing": False}
 _store_lock = threading.Lock()
@@ -158,7 +157,6 @@ def settings_defaults():
         "music_file_yi": "",
         "mail_mode": "all" if ALLOW_ALL_PHONES else ("listed" if ALLOWED_PHONES else "off"),
         "mail_contacts": MAIL_CONTACTS,
-        "greeting": DEFAULT_GREETING,
         "extra_instructions": "",
     }
 
@@ -1385,7 +1383,7 @@ def ivr():
                 return Response(wait_command(), mimetype="text/plain")
 
         # Personalized opening for returning callers, general invitation for first-time callers.
-        return Response(read_command(st.get("opening_greeting") or cfg("greeting") or DEFAULT_GREETING, call_id, st["turn"]), mimetype="text/plain")
+        return Response(read_command(st.get("opening_greeting") or "שלום, אני כאן להמשיך מהמקום שבו עצרנו. מה תרצה להעלות היום?", call_id, st["turn"]), mimetype="text/plain")
 
 
 # ---------------- ממשק ניהול ----------------
@@ -1917,10 +1915,6 @@ def admin_settings_put():
     if music and not re.fullmatch(r"[/A-Za-z0-9._-]{1,100}", music):
         return jsonify({"error": "נתיב המנגינה לא תקין"}), 400
     out["music_file"] = music
-    greeting = str(d.get("greeting", "")).strip()
-    if len(greeting) > 300:
-        return jsonify({"error": "ברכת הפתיחה ארוכה מדי (עד 300 תווים)"}), 400
-    out["greeting"] = greeting or DEFAULT_GREETING
     extra = str(d.get("extra_instructions", "")).strip()
     if len(extra) > 600:
         return jsonify({"error": "ההנחיות הנוספות ארוכות מדי (עד 600 תווים)"}), 400
