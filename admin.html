@@ -193,6 +193,25 @@
     return h('header', null, kids);
   }
 
+  /* ---------- התראות מנהל ---------- */
+  function notificationsPanel() {
+    var items = S.notifications || [];
+    if (!items.length) return null;
+    return h('section', null,
+      h('h2', null, 'התראות מערכת'),
+      h('p', { class: 'sub' }, 'נדרשת פעולה כדי להמשיך להקצות מכסות API אישיות.'),
+      items.map(function (item) {
+        return h('article', { class: 'line' },
+          h('span', { class: 'lamp warn', 'aria-hidden': 'true' }),
+          h('div', null,
+            h('strong', null, item.message),
+            h('div', { class: 'sub' }, (item.phone ? 'מספר: ' + item.phone + ' · ' : '') + new Date(item.created_at).toLocaleString('he-IL'))),
+          h('button', { class: 'quiet', onclick: function () {
+            act('מסמן שטופל', function () { return api('POST', 'notifications/' + item.id); });
+          } }, 'סימון כטופל'));
+      }));
+  }
+
   /* ---------- קווים ומפתחות ---------- */
   function callersPanel() {
     var d = S.default_key;
@@ -425,7 +444,7 @@
     return box;
   }
 
-  function render() { app.replaceChildren(header(), callersPanel(), keyPoolPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
+  function render() { app.replaceChildren(header(), notificationsPanel(), callersPanel(), keyPoolPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
   function load() {
     return api('GET', 'state').then(function (j) { S = j; render(); }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
