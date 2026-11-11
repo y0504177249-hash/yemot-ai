@@ -905,26 +905,49 @@ def tts_wav(text, voice):
         if _is_bad(name):
             continue
         for with_style in (True, False):
-            item = {"type": "text", "text": text}
-            if with_style:
-                item["annotations"] = [{"type": "speech_metadata", "style": (YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE)}]
             try:
-                res = cur_client().interactions.create(
+                # Gemini TTS is served through the Generate Content API.
+                # Interactions.create is not the documented TTS endpoint.
+                spoken_text = str(text or "").strip()
+                if with_style:
+                    style = YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE
+                    spoken_text = style + "\nSay the following text exactly as written:\n" + spoken_text
+                res = cur_client().models.generate_content(
                     model=name,
-                    input=[{"type": "user_input", "content": [item]}],
-                    response_format={"type": "audio"},
-                    generation_config={"speech_config": [{"voice": voice}]},
+                    contents=spoken_text,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=voice
+                                )
+                            )
+                        ),
+                    ),
                 )
-                data = base64.b64decode(res.output_audio.data)
-                if data[:4] == b"RIFF":  # הבקשה מחזירה כבר קובץ WAV שלם
+                data = None
+                for candidate in (getattr(res, "candidates", None) or []):
+                    content = getattr(candidate, "content", None)
+                    for part in (getattr(content, "parts", None) or []):
+                        inline = getattr(part, "inline_data", None)
+                        payload = getattr(inline, "data", None) if inline else None
+                        if payload:
+                            data = base64.b64decode(payload) if isinstance(payload, str) else payload
+                            break
+                    if data:
+                        break
+                if not data:
+                    raise RuntimeError("Gemini TTS returned no audio data")
+                if data[:4] == b"RIFF":
                     return data
+                # Gemini returns 24 kHz, mono, 16-bit PCM for TTS.
                 buf = io.BytesIO()
-                w = wave.open(buf, "wb")
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(24000)
-                w.writeframes(data)
-                w.close()
+                with wave.open(buf, "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(24000)
+                    wav_file.writeframes(data)
                 return buf.getvalue()
             except Exception as e:
                 last_err = e
@@ -934,7 +957,6 @@ def tts_wav(text, voice):
                     _mark_bad(name, e)
                     break
     raise last_err or RuntimeError("no tts model available")
-
 
 def upload_to_yemot(wav_bytes, name):
     r = requests.post(
