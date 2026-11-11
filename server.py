@@ -1152,6 +1152,8 @@ def transcribe_caller_name(recorded, phone, use_yiddish):
 
 
 def worker_name(call_id, recorded, phone, use_yiddish):
+    _tls.client = client_for(phone)
+    _tls.keyid = phone if phone in all_keys() else "default"
     name = transcribe_caller_name(recorded, phone, use_yiddish)
     with lock:
         st = calls.get(call_id)
@@ -1159,6 +1161,7 @@ def worker_name(call_id, recorded, phone, use_yiddish):
             st["name_status"] = "done"
             st["name_recording"] = recorded
             st["name_captured"] = bool(name)
+            st["last"] = recorded
 
 
 def worker(call_id, recorded, phone="", use_yiddish=None):
@@ -1287,7 +1290,29 @@ def ivr():
             ))
         st["t"] = time.time()
 
-        # הקלטה חדשה שעדיין לא טופלה: מתחילים עיבוד ברקע ומשמיעים המתנה
+        # First-time callers record their name once, before the first question.
+        if phone and not caller(phone).get("name"):
+            if not st.get("name_prompted"):
+                st["name_prompted"] = True
+                prompt = ("כדי איך זאל דיך קענען דערקענען ווייטער, זאג ביטע דיין נאמען." if use_yiddish
+                          else "כדי שאוכל לזהות אותך בשיחות הבאות, אמור בבקשה את שמך המלא.")
+                name_file = "n" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
+                return Response(
+                    f"read=t-{clean_for_tts(prompt)}=question,no,record,{active_record_path()},{name_file},no,yes,no",
+                    mimetype="text/plain",
+                )
+            if st.get("name_status") == "processing":
+                return Response(wait_command(), mimetype="text/plain")
+            if recorded and not st.get("name_status"):
+                st["name_status"] = "processing"
+                threading.Thread(target=worker_name, args=(call_id, recorded, phone, use_yiddish), daemon=True).start()
+                return Response(wait_command(), mimetype="text/plain")
+            if st.get("name_status") == "done" and not st.get("name_question_prompted"):
+                st["name_question_prompted"] = True
+                prompt = ("א דאנק. וואס ווילסטו פרעגן?" if use_yiddish else "תודה. עכשיו אפשר לשאול את השאלה שלך.")
+                return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
+
+        # הקלטה חדשה של שאלה: מתחילים עיבוד ברקע ומשמיעים המתנה
         if recorded and recorded != st["last"]:
             st["last"] = recorded
             st["status"] = "processing"
@@ -1682,6 +1707,15 @@ def admin_caller_put():
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
     _caller_loaded.add(phone)
+    # Allocate an encrypted pool key immediately when an administrator registers a new caller.
+    if not cur.get("key") and phone not in GEMINI_KEYS:
+        try:
+            allocated = key_pool_assign(phone)
+            if not allocated:
+                db_notify_key_pool_empty(phone)
+        except Exception as e:
+            print("admin caller key allocation failed:", redact(e), flush=True)
+            db_notify_key_pool_empty(phone)
     warning = persist("callers", callers)
     if not db_save_caller(phone, cur) and DATABASE_URL:
         warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נשמרו במסד הנתונים"
