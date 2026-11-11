@@ -590,6 +590,28 @@ def db_save_transcript(call_id, phone, heard, answer):
         conn.close()
 
 
+def db_admin_recent_transcripts(limit=5):
+    conn = db_connect()
+    if conn is None:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT phone, caller_name, heard, answer, created_at
+                   FROM call_transcripts ORDER BY created_at DESC, id DESC LIMIT %s""",
+                (max(1, min(int(limit), 10)),),
+            )
+            rows = cur.fetchall()
+        return [{"phone": r[0] or "", "name": r[1] or "", "heard": r[2] or "",
+                 "answer": r[3] or "", "created_at": r[4].strftime("%d/%m %H:%M") if r[4] else ""}
+                for r in rows]
+    except Exception as e:
+        print("admin transcript query failed:", redact(e), flush=True)
+        return []
+    finally:
+        conn.close()
+
+
 def clean_for_tts(text):
     # משאירים רק אותיות, ספרות ורווחים. סימנים מיוחדים עלולים לשבש את הפקודה
     text = re.sub(r"[^0-9A-Za-z֐-׿ ]", " ", text)
@@ -628,8 +650,9 @@ def admin_menu_text(message=""):
     enabled = "פעיל" if cfg("system_enabled") else "כבוי"
     voice = "מופעל" if voice_on() else "כבוי"
     return (prefix + f"תפריט ניהול. מצב העוזר: {enabled}. קול: {voice}. "
-            "להפעלת או כיבוי העוזר הקש 2. להפעלה או כיבוי של המענה הקולי הקש 3. "
-            "להחלפת קול הקש 4. לבדיקת מצב הקש 1. ליציאה הקש 5.")
+            "לבדיקת מצב הקש 1. להפעלה או כיבוי של העוזר הקש 2. למענה קולי הקש 3. "
+            "להחלפת קול הקש 4. ליציאה לשיחה רגילה הקש 5. לתמלולי שיחות אחרונות הקש 6. "
+            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8.")
 
 
 def admin_status_text():
@@ -1342,8 +1365,9 @@ def ivr():
         return Response("id_list_message=t-אין לך הרשאה להשתמש בשלוחה זו&go_to_folder=hangup", mimetype="text/plain")
 
     # רק מתקשרים שהרשאת המייל שלהם פתוחה יכולים לראות את בקשת קוד הניהול.
-    keypad = (p.get("admin_code") or p.get("admin_action") or p.get("Digits") or
-              p.get("digits") or p.get("ApiDigits") or "").strip()
+    keypad = (p.get("admin_code") or p.get("admin_action") or p.get("admin_phone") or
+              p.get("transcript_choice") or p.get("Digits") or p.get("digits") or
+              p.get("ApiDigits") or "").strip()
     recorded_all = p.getlist("question")
     recorded = recorded_all[-1] if recorded_all else None
 
@@ -1431,8 +1455,64 @@ def ivr():
                 elif keypad == "5":
                     st["admin_stage"] = "chat"
                     return Response(read_command("יצאת מתפריט הניהול. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
+                elif keypad == "6":
+                    transcripts = db_admin_recent_transcripts(5)
+                    if not transcripts:
+                        message = "לא נמצאו תמלולי שיחות במסד הנתונים"
+                    else:
+                        st["admin_transcripts"] = transcripts
+                        st["admin_stage"] = "transcript_pick"
+                        options = " ".join(
+                            f"{i + 1}. {clean_for_tts(item['name'] or item['phone'])} {item['created_at']}"
+                            for i, item in enumerate(transcripts)
+                        )
+                        return Response(
+                            admin_digits_command("חמש השיחות האחרונות. " + options + ". להאזנה לתמלול הקש את מספר השיחה", "transcript_choice", 1, 1),
+                            mimetype="text/plain",
+                        )
+                elif keypad == "7":
+                    st["admin_stage"] = "block_phone"
+                    return Response(admin_digits_command("הקש את מספר הטלפון שברצונך לחסום", "admin_phone", 15, 9), mimetype="text/plain")
+                elif keypad == "8":
+                    st["admin_stage"] = "unblock_phone"
+                    return Response(admin_digits_command("הקש את מספר הטלפון שברצונך לפתוח מחסימה", "admin_phone", 15, 9), mimetype="text/plain")
                 else:
                     message = "לא זיהיתי את הבחירה"
+                return Response(admin_digits_command(admin_menu_text(message), "admin_action", 1, 1), mimetype="text/plain")
+            elif stage == "transcript_pick":
+                transcripts = st.get("admin_transcripts") or []
+                if keypad.isdigit() and 1 <= int(keypad) <= len(transcripts):
+                    item = transcripts[int(keypad) - 1]
+                    transcript_text = (
+                        f"שיחה מאת {item['name'] or item['phone']}. בתאריך {item['created_at']}. "
+                        f"המתקשר אמר: {item['heard']}. תשובת העוזר: {item['answer']}"
+                    )
+                    st["admin_stage"] = "menu"
+                    st.pop("admin_transcripts", None)
+                    return Response(
+                        "id_list_message=t-" + clean_for_tts(transcript_text) + "&go_to_folder=/8",
+                        mimetype="text/plain",
+                    )
+                st["admin_stage"] = "menu"
+                return Response(admin_digits_command(admin_menu_text("בחירה לא תקינה"), "admin_action", 1, 1), mimetype="text/plain")
+            elif stage in ("block_phone", "unblock_phone"):
+                target_phone = re.sub(r"\\D", "", keypad)
+                if not target_phone.isdigit() or not 9 <= len(target_phone) <= 15:
+                    st["admin_stage"] = "menu"
+                    return Response(admin_digits_command(admin_menu_text("מספר הטלפון אינו תקין"), "admin_action", 1, 1), mimetype="text/plain")
+                profile = dict(caller(target_phone))
+                should_enable = stage == "unblock_phone"
+                profile["enabled"] = should_enable
+                callers = dict(_store["callers"])
+                callers[target_phone] = profile
+                warning = persist("callers", callers)
+                db_ok = db_save_caller(target_phone, profile)
+                st["admin_stage"] = "menu"
+                message = ("החסימה הוסרה עבור המספר " if should_enable else "המספר נחסם: ") + target_phone
+                if warning:
+                    message += ". " + warning
+                if DATABASE_URL and not db_ok:
+                    message += ". לא הצלחתי לאמת שמירה במסד הנתונים"
                 return Response(admin_digits_command(admin_menu_text(message), "admin_action", 1, 1), mimetype="text/plain")
 
         if not cfg("system_enabled") and st.get("admin_stage") != "menu":
