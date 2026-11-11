@@ -199,10 +199,26 @@ def default_voice_index():
 
 
 def redact(text):
+    # Redact credentials before anything reaches Render logs or admin errors.
     text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[מפתח]", str(text))
-    for k in list(all_keys().values()) + [GEMINI_API_KEY]:
-        if k and len(k) > 8:
-            text = text.replace(k, "[מפתח]")
+    secrets = [
+        YEMOT_PASSWORD,
+        MAIL_WEBHOOK_SECRET,
+        BREVO_API_KEY,
+        GOOGLE_CLIENT_SECRET,
+        ADMIN_PASSWORD if "ADMIN_PASSWORD" in globals() else "",
+        GEMINI_KEY_ENCRYPTION_KEY if "GEMINI_KEY_ENCRYPTION_KEY" in globals() else "",
+        GEMINI_API_KEY,
+    ]
+    try:
+        secrets.extend(all_keys().values())
+    except Exception:
+        pass
+    for secret in secrets:
+        if secret and len(secret) >= 6:
+            text = text.replace(secret, "[סוד]")
+    # Hide credentials that appear as query/form parameters in HTTP exceptions.
+    text = re.sub(r'(?i)(token|password|secret|api[_-]?key)=([^&\s]+)', r'\1=[מוסתר]', text)
     return text
 
 
@@ -749,19 +765,35 @@ def handle_mail(call_id, mail, heard):
     return "לא הבנתי מה לעשות עם המיילים"
 
 
+def normalize_recording_path(path):
+    # Yemot may return a filename or a path that already includes the extension folder.
+    # Strip repeated copies to prevent /8/8 and /1/1/1/1.
+    folder = "/" + "/".join(part for part in str(active_record_path()).split("/") if part)
+    relative = str(path or "").strip().replace("\\", "/")
+    if relative.startswith("ivr2:"):
+        relative = relative[5:]
+    relative = "/" + relative.lstrip("/")
+    while relative.startswith(folder + "/"):
+        relative = relative[len(folder):]
+    relative = relative.lstrip("/")
+    if not relative:
+        raise ValueError("recording filename is empty")
+    if not relative.lower().endswith(".wav"):
+        relative += ".wav"
+    return "ivr2:" + folder + "/" + relative
+
+
 def download_recording(path):
-    if not path.startswith("/"):
-        path = "/" + path
-    if not path.lower().endswith(".wav"):
-        path += ".wav"
+    yemot_path = normalize_recording_path(path)
     r = requests.get(
         "https://www.call2all.co.il/ym/api/DownloadFile",
-        params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": f"ivr2:{active_record_path().rstrip('/')}/{path.lstrip('/')}"},
-        timeout=15,
+        params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": yemot_path},
+        timeout=20,
     )
     r.raise_for_status()
+    if not r.content:
+        raise RuntimeError("Yemot returned an empty recording")
     return r.content
-
 
 FALLBACK_MODELS = [
     x.strip()
@@ -1354,7 +1386,7 @@ def ivr():
             st["turn"] += 1
             if st.get("audio"):
                 fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(st["turn"])
-                cmd = f"read=f-{st['audio']}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
+                cmd = f"read=f-{st['audio']}=question,no,record,{active_record_path()},{fname},no,yes,no"
                 return Response(cmd, mimetype="text/plain")
             text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
             return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
