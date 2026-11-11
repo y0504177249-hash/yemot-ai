@@ -385,7 +385,7 @@ def db_connect():
     if not DATABASE_URL or psycopg is None:
         return None
     try:
-        return psycopg.connect(DATABASE_URL, connect_timeout=5)
+        return psycopg.connect(DATABASE_URL, connect_timeout=15)
     except Exception as e:
         print("database connection failed:", redact(e), flush=True)
         return None
