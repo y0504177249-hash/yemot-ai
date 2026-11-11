@@ -333,6 +333,7 @@ histories = {}
 calls = {}  # call_id -> {"turn": int, "last": str, "status": "idle|processing", "answer": str, "t": float}
 lock = threading.Lock()
 _history_loaded = set()
+_caller_loaded = set()
 
 
 def db_connect():
@@ -370,6 +371,7 @@ def db_save_caller(phone, profile):
 
 
 def db_delete_caller(phone):
+    _caller_loaded.discard(phone)
     conn = db_connect()
     if conn is None:
         return False
@@ -386,7 +388,7 @@ def db_delete_caller(phone):
 
 
 def db_load_caller(phone):
-    if not phone:
+    if not phone or phone in _caller_loaded:
         return
     conn = db_connect()
     if conn is None:
@@ -403,6 +405,7 @@ def db_load_caller(phone):
             current["name"] = row[0] or current.get("name", "")
             current["enabled"] = bool(row[1])
             _store["callers"][phone] = current
+        _caller_loaded.add(phone)
     except Exception as e:
         print("database caller load failed:", redact(e), flush=True)
     finally:
@@ -1276,6 +1279,7 @@ def admin_caller_put():
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
+    _caller_loaded.add(phone)
     warning = persist("callers", callers)
     if not db_save_caller(phone, cur) and DATABASE_URL:
         warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נשמרו במסד הנתונים"
