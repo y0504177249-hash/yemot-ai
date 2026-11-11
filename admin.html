@@ -271,7 +271,7 @@
   function uploadMusic(input, lang) {
     var file = input.files && input.files[0];
     if (!file) { say('בחר תחילה קובץ MP3', true); return; }
-    if (!/\\.mp3$/i.test(file.name) || file.size > 15 * 1024 * 1024) {
+    if (!/\.mp3$/i.test(file.name) || file.size > 15 * 1024 * 1024) {
       say('יש לבחור קובץ MP3 עד 15MB', true); return;
     }
     var data = new FormData(); data.append('file', file);
