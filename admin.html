@@ -80,6 +80,7 @@
 (function () {
   var app = document.getElementById('app');
   var S = null;
+  var googleLoginEnabled = false;
   var note = document.createElement('p');
   note.className = 'note'; note.setAttribute('role', 'status');
 
@@ -127,6 +128,12 @@
   function showLogin(msg) {
     var pw = h('input', { type: 'password', id: 'pw', autocomplete: 'current-password' });
     var out = h('p', { class: 'note bad', role: 'status' }, msg || '');
+    var kids = [
+      h('h1', null, 'ניהול העוזר הקולי')
+    ];
+    if (googleLoginEnabled) {
+      kids.push(h('a', { href: '/admin/google/login', style: 'display:block; text-align:center; text-decoration:none; background:var(--act); color:var(--act-ink); border-radius:8px; padding:10px 14px; margin-top:14px; min-height:44px' }, 'התחברות עם Google'));
+    }
     var go = function (ev) {
       ev.preventDefault();
       fetch('/admin/login', {
@@ -138,11 +145,13 @@
           if (a[0].ok) load(); else out.textContent = a[1].error || 'הכניסה נכשלה';
         });
     };
-    app.replaceChildren(h('form', { class: 'login', onsubmit: go },
-      h('h1', null, 'ניהול העוזר הקולי'),
+    var formKids = kids.slice();
+    if (true) formKids.push(
       h('label', { class: 'f', for: 'pw' }, 'סיסמת ניהול'),
       pw, out,
-      h('div', { class: 'bar' }, h('button', { type: 'submit' }, 'כניסה'))));
+      h('div', { class: 'bar' }, h('button', { type: 'submit' }, 'כניסה'))
+    );
+    app.replaceChildren(h('form', { class: 'login', onsubmit: go }, formKids));
     pw.focus();
   }
 
@@ -377,6 +386,7 @@
   }
 
   fetch('/admin/api/whoami', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (j) {
+    googleLoginEnabled = !!j.google_enabled;
     if (!j.enabled) { app.replaceChildren(h('div', { class: 'login' }, h('h1', null, 'ניהול העוזר הקולי'), h('p', { class: 'sub' }, 'ממשק הניהול כבוי. הגדר ב-Render משתנה סביבה בשם ADMIN_PASSWORD כדי להפעיל אותו.'))); return; }
     if (j.auth) load(); else showLogin();
   });
