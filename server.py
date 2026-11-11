@@ -1515,7 +1515,7 @@ def ivr():
                     message += ". לא הצלחתי לאמת שמירה במסד הנתונים"
                 return Response(admin_digits_command(admin_menu_text(message), "admin_action", 1, 1), mimetype="text/plain")
 
-        if not cfg("system_enabled") and st.get("admin_stage") != "menu":
+        if not cfg("system_enabled") and st.get("admin_stage") not in ("code", "menu", "transcript_pick", "block_phone", "unblock_phone"):
             return Response("id_list_message=t-העוזר אינו זמין כרגע&go_to_folder=hangup", mimetype="text/plain")
 
         # First-time callers record their name once, before the first question.
