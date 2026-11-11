@@ -12,6 +12,7 @@ import functools
 import threading
 import collections
 import requests
+from urllib.parse import urlencode
 try:
     import psycopg
 except ImportError:
@@ -19,6 +20,12 @@ except ImportError:
 from flask import Flask, request, Response, session, jsonify, send_file
 from google import genai
 from google.genai import types
+try:
+    from google.oauth2 import id_token as google_id_token
+    from google.auth.transport import requests as google_auth_requests
+except ImportError:
+    google_id_token = None
+    google_auth_requests = None
 
 # ---- הגדרות מתוך משתני סביבה (לא לשמור סיסמאות בקוד) ----
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
@@ -1131,6 +1138,15 @@ def ivr():
 
 # ---------------- ממשק ניהול ----------------
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_ADMIN_EMAIL = os.environ.get("GOOGLE_ADMIN_EMAIL", "y0504177249@gmail.com").strip().lower()
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
+GOOGLE_LOGIN_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI and google_id_token and google_auth_requests)
+
+
+def admin_auth_enabled():
+    return bool(ADMIN_PASSWORD or GOOGLE_LOGIN_ENABLED)
 app.secret_key = hashlib.sha256(
     ("sess|" + ADMIN_PASSWORD + "|" + MAIL_WEBHOOK_SECRET + "|" + YEMOT_PASSWORD).encode("utf-8")
 ).hexdigest()
@@ -1176,7 +1192,7 @@ def login_blocked(ip):
 def admin_required(f):
     @functools.wraps(f)
     def wrapper(*a, **k):
-        if not ADMIN_PASSWORD or not session.get("admin"):
+        if not admin_auth_enabled() or not session.get("admin"):
             return jsonify({"error": "נדרשת כניסה"}), 401
         if request.method != "GET" and request.headers.get("X-Requested-With") != "admin":
             return jsonify({"error": "בקשה לא תקינה"}), 403
@@ -1193,7 +1209,67 @@ def admin_page():
 
 @app.route("/admin/api/whoami")
 def admin_whoami():
-    return jsonify({"enabled": bool(ADMIN_PASSWORD), "auth": bool(session.get("admin"))})
+    return jsonify({"enabled": admin_auth_enabled(), "auth": bool(session.get("admin")), "google_enabled": GOOGLE_LOGIN_ENABLED})
+
+
+@app.route("/admin/google/login")
+def admin_google_login():
+    if not GOOGLE_LOGIN_ENABLED:
+        return Response("התחברות Google עדיין לא הוגדרה בשרת", status=503, mimetype="text/plain")
+    state = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+    session["google_oauth_state"] = state
+    session.permanent = True
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    }
+    return Response(status=302, headers={"Location": "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)})
+
+
+@app.route("/admin/google/callback")
+def admin_google_callback():
+    if not GOOGLE_LOGIN_ENABLED:
+        return Response("התחברות Google עדיין לא הוגדרה בשרת", status=503, mimetype="text/plain")
+    expected = session.pop("google_oauth_state", "")
+    supplied = request.args.get("state", "")
+    code = request.args.get("code", "")
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied) or not code:
+        return Response("בקשת התחברות לא תקינה. חזור למסך הכניסה.", status=400, mimetype="text/plain")
+    try:
+        token_response = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=15,
+        )
+        token_response.raise_for_status()
+        id_token_value = token_response.json().get("id_token", "")
+        if not id_token_value:
+            raise ValueError("missing id_token")
+        claims = google_id_token.verify_oauth2_token(
+            id_token_value, google_auth_requests.Request(), GOOGLE_CLIENT_ID
+        )
+        email = str(claims.get("email", "")).strip().lower()
+        if not claims.get("email_verified") or not email or not hmac.compare_digest(email, GOOGLE_ADMIN_EMAIL):
+            print("Google admin login denied", flush=True)
+            return Response("חשבון Google זה אינו מורשה לניהול.", status=403, mimetype="text/plain")
+        session.clear()
+        session["admin"] = True
+        session["admin_email"] = email
+        session.permanent = True
+        return Response(status=302, headers={"Location": "/admin"})
+    except Exception as e:
+        print("Google OAuth callback failed:", str(e)[:200], flush=True)
+        return Response("ההתחברות עם Google נכשלה. נסה שוב.", status=400, mimetype="text/plain")
 
 
 @app.route("/admin/login", methods=["POST"])
@@ -1201,7 +1277,7 @@ def admin_login():
     if request.headers.get("X-Requested-With") != "admin":
         return jsonify({"error": "בקשה לא תקינה"}), 403
     if not ADMIN_PASSWORD:
-        return jsonify({"error": "ממשק הניהול כבוי"}), 403
+        return jsonify({"error": "כניסה בסיסמה אינה מוגדרת. השתמש בהתחברות Google."}), 403
     ip = client_ip()
     if login_blocked(ip):
         return jsonify({"error": "יותר מדי ניסיונות. נסה שוב בעוד כמה דקות"}), 429
