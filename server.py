@@ -618,9 +618,9 @@ def wait_command():
     return f"id_list_message=t-נא להמתין&go_to_folder={active_extension_path()}"
 
 
-def admin_digits_command(prompt, field, maximum=10, minimum=1):
-    # Yemot returns the keypad value under the requested field (and in some setups as Digits).
-    return f"read=t-{clean_for_tts(prompt)}={field},yes,{maximum},{minimum},Digits,yes,no"
+def admin_digits_command(prompt, field, maximum=10, minimum=0):
+    # Yemot read action: variable name, max digits, min digits, keypad mode.
+    return f"read=t={clean_for_tts(prompt)}={field},,{maximum},{minimum},Digits,yes"
 
 
 def admin_menu_text(message=""):
