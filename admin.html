@@ -196,7 +196,7 @@
   /* ---------- התראות מנהל ---------- */
   function notificationsPanel() {
     var items = S.notifications || [];
-    if (!items.length) return null;
+    if (!items.length) return h('div');
     return h('section', null,
       h('h2', null, 'התראות מערכת'),
       h('p', { class: 'sub' }, 'נדרשת פעולה כדי להמשיך להקצות מכסות API אישיות.'),
