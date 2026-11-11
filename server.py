@@ -254,7 +254,7 @@ def _write_local():
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"settings": _store["settings"], "callers": _store["callers"]}, f, ensure_ascii=False)
     except Exception as e:
-        print("local config write failed:", e, flush=True)
+        print("local config write failed:", redact(e), flush=True)
 
 
 def _store_error(e):
@@ -345,9 +345,9 @@ if os.environ.get("CONFIGURE_YEMOT_LANGUAGE_EXTENSIONS") == "1":
                 timeout=20,
             )
             setup_response.raise_for_status()
-            print(f"Yemot {extension_path} language={language} update:", setup_response.text[:500], flush=True)
+            print(f"Yemot {extension_path} language={language} update:", redact(setup_response.text)[:500], flush=True)
         except Exception as setup_error:
-            print(f"Yemot {extension_path} update failed:", str(setup_error)[:300], flush=True)
+            print(f"Yemot {extension_path} update failed:", redact(setup_error)[:300], flush=True)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
 _clients = {}
 _tls = threading.local()
@@ -843,7 +843,7 @@ def discover_models():
                 if "flash" in n and "generateContent" in actions and not any(x in n for x in skip):
                     _discovered["names"].append(n)
         except Exception as e:
-            print("list models failed:", e, flush=True)
+            print("list models failed:", redact(e), flush=True)
     return _discovered["names"]
 
 
@@ -862,7 +862,7 @@ def call_model(contents, config):
                 except Exception as e:
                     last_err = e
                     msg = str(e)
-                    print(f"gemini {name} attempt {attempt} failed: {msg[:200]}", flush=True)
+                    print(f"gemini {name} attempt {attempt} failed: {redact(msg)[:200]}", flush=True)
                     transient = any(x in msg for x in ("503", "UNAVAILABLE", "504", "DEADLINE"))
                     if transient and attempt == 1:
                         time.sleep(0.5)
@@ -918,7 +918,7 @@ def tts_wav(text, voice):
             except Exception as e:
                 last_err = e
                 msg = str(e)
-                print(f"tts {name} style={with_style} failed: {msg[:200]}", flush=True)
+                print(f"tts {name} style={with_style} failed: {redact(msg)[:200]}", flush=True)
                 if any(x in msg for x in ("429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")):
                     _mark_bad(name, e)
                     break
@@ -1018,7 +1018,7 @@ if MUSIC_FILE:
     try:
         upload_hold_music()
     except Exception as music_error:
-        print("Yemot hold music setup failed:", str(music_error)[:300], flush=True)
+        print("Yemot hold music setup failed:", redact(music_error)[:300], flush=True)
 
 
 WIKI_HEADERS = {"User-Agent": "YemotAIAssistant/1.0 (personal phone assistant)"}
@@ -1100,7 +1100,7 @@ def do_lookup(lookup, heard):
             return web_lookup(heard or query)
         return web_lookup(heard or query)
     except Exception as e:
-        print("lookup error:", e, flush=True)
+        print("lookup error:", redact(e), flush=True)
         return ""
 
 
@@ -1152,7 +1152,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
             print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
             answer = found or "לא הצלחתי למצוא מידע על זה"
     except Exception as e:
-        print("action error:", e, flush=True)
+        print("action error:", redact(e), flush=True)
         answer = "לא הצלחתי לבצע את הפעולה"
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
@@ -1551,7 +1551,7 @@ def admin_google_callback():
         session.permanent = True
         return Response(status=302, headers={"Location": "/admin"})
     except Exception as e:
-        print("Google OAuth callback failed:", str(e)[:200], flush=True)
+        print("Google OAuth callback failed:", redact(e)[:200], flush=True)
         return Response("ההתחברות עם Google נכשלה. נסה שוב.", status=400, mimetype="text/plain")
 
 
