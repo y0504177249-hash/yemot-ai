@@ -891,7 +891,6 @@ TTS_MODELS = list(dict.fromkeys(
         "gemini-3.8-flash-lite-tts",
         "gemini-3.8-flash-tts",
         "gemini-3.1-flash-tts-preview",
-        "gemini-2.5-flash-preview-tts",
         "gemini-2.5-pro-preview-tts",
     ]
 ))
@@ -905,25 +904,39 @@ def tts_wav(text, voice):
         if _is_bad(name):
             continue
         for with_style in (True, False):
-            item = {"type": "text", "text": text}
-            if with_style:
-                item["annotations"] = [{
-                    "type": "speech_metadata",
-                    "style": YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE,
-                }]
             try:
-                # Gemini 3.8 TTS uses the Interactions API.
-                res = cur_client().interactions.create(
+                spoken_text = str(text or "").strip()
+                if with_style:
+                    style = YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE
+                    spoken_text = style + "\nSay the following text exactly as written:\n" + spoken_text
+                # Gemini TTS models are supported by GenerateContent, not Interactions.
+                res = cur_client().models.generate_content(
                     model=name,
-                    input=[{"type": "user_input", "content": [item]}],
-                    response_format={"type": "audio"},
-                    generation_config={"speech_config": [{"voice": voice}]},
+                    contents=spoken_text,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=voice
+                                )
+                            )
+                        ),
+                    ),
                 )
-                audio = getattr(res, "output_audio", None)
-                encoded = getattr(audio, "data", None) if audio else None
-                if not encoded:
+                data = None
+                for candidate in (getattr(res, "candidates", None) or []):
+                    content = getattr(candidate, "content", None)
+                    for part in (getattr(content, "parts", None) or []):
+                        inline = getattr(part, "inline_data", None)
+                        payload = getattr(inline, "data", None) if inline else None
+                        if payload:
+                            data = base64.b64decode(payload) if isinstance(payload, str) else payload
+                            break
+                    if data:
+                        break
+                if not data:
                     raise RuntimeError("Gemini TTS returned no audio data")
-                data = base64.b64decode(encoded) if isinstance(encoded, str) else encoded
                 if data[:4] == b"RIFF":
                     return data
                 # Headerless Gemini PCM: 24 kHz, mono, 16-bit.
