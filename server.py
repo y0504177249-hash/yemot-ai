@@ -64,6 +64,8 @@ except Exception:
 ALLOWED_PHONES = [x.strip() for x in os.environ.get("ALLOWED_PHONES", "").split(",") if x.strip()]
 # ALLOWED_PHONES=* מתיר לכל מי שמגיע לשלוחה (למשל מי שהזין את סיסמת השלוחה בימות המשיח)
 ALLOW_ALL_PHONES = "*" in ALLOWED_PHONES
+# קוד כניסה לניהול טלפוני; ניתן לשנות דרך משתנה סביבה ב-Render.
+PHONE_ADMIN_CODE = os.environ.get("PHONE_ADMIN_CODE", "333223410").strip()
 
 
 
@@ -151,6 +153,7 @@ def settings_defaults():
     return {
         "model": MODEL,
         "voice_enabled": VOICE_ENABLED,
+        "system_enabled": True,
         "default_voice": VOICES[0],
         "music_file": MUSIC_FILE,
         "music_file_he": "",
@@ -613,6 +616,27 @@ def wait_command():
     if music:
         return f"id_list_message=f-{music}&go_to_folder={active_extension_path()}"
     return f"id_list_message=t-נא להמתין&go_to_folder={active_extension_path()}"
+
+
+def admin_digits_command(prompt, field, maximum=10, minimum=1):
+    # Yemot returns the keypad value under the requested field (and in some setups as Digits).
+    return f"read=t-{clean_for_tts(prompt)}={field},yes,{maximum},{minimum},Digits,yes,no"
+
+
+def admin_menu_text(message=""):
+    prefix = (message + ". ") if message else ""
+    enabled = "פעיל" if cfg("system_enabled") else "כבוי"
+    voice = "מופעל" if voice_on() else "כבוי"
+    return (prefix + f"תפריט ניהול. מצב העוזר: {enabled}. קול: {voice}. "
+            "להפעלת או כיבוי העוזר הקש 2. להפעלה או כיבוי של המענה הקולי הקש 3. "
+            "להחלפת קול הקש 4. לבדיקת מצב הקש 1. ליציאה הקש 5.")
+
+
+def admin_status_text():
+    active = sum(1 for item in calls.values() if time.time() - item.get("t", 0) < 120)
+    state = "פעיל" if cfg("system_enabled") else "כבוי"
+    voice = "מופעל" if voice_on() else "כבוי"
+    return f"מצב העוזר {state}. המענה הקולי {voice}. מספר שיחות פעילות כרגע {active}."
 
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
@@ -1317,6 +1341,9 @@ def ivr():
     if caller(phone).get("enabled") is False:
         return Response("id_list_message=t-אין לך הרשאה להשתמש בשלוחה זו&go_to_folder=hangup", mimetype="text/plain")
 
+    # רק מתקשרים שהרשאת המייל שלהם פתוחה יכולים לראות את בקשת קוד הניהול.
+    keypad = (p.get("admin_code") or p.get("admin_action") or p.get("Digits") or
+              p.get("digits") or p.get("ApiDigits") or "").strip()
     recorded_all = p.getlist("question")
     recorded = recorded_all[-1] if recorded_all else None
 
@@ -1357,6 +1384,59 @@ def ivr():
                 greeting = "שלום, אני כאן להקשיב ולעזור. על מה תרצה לדבר היום?"
         st.setdefault("opening_greeting", greeting)
         st["t"] = time.time()
+
+        # Phone admin entry is offered only on Hebrew extension 8 and only to mail-authorized callers.
+        if not use_yiddish and phone and phone_allowed(phone):
+            stage = st.get("admin_stage")
+            if stage is None:
+                st["admin_stage"] = "code"
+                return Response(
+                    admin_digits_command("לניהול הקו הקש את קוד הניהול. להמשך לשיחה עם העוזר הקש סולמית.", "admin_code", 10, 1),
+                    mimetype="text/plain",
+                )
+            if stage == "code":
+                if keypad:
+                    if hmac.compare_digest(keypad, PHONE_ADMIN_CODE):
+                        st["admin_stage"] = "menu"
+                        return Response(admin_digits_command(admin_menu_text("הקוד אושר"), "admin_action", 1, 1), mimetype="text/plain")
+                    st["admin_stage"] = "chat"
+                    return Response(read_command("הקוד שגוי. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
+                # No digits means the caller pressed # to continue to the regular AI assistant.
+                st["admin_stage"] = "chat"
+            elif stage == "menu":
+                if keypad == "1":
+                    message = admin_status_text()
+                elif keypad == "2":
+                    settings = dict(_store["settings"])
+                    settings["system_enabled"] = not bool(cfg("system_enabled"))
+                    warning = persist("settings", settings)
+                    message = ("העוזר הופעל" if settings["system_enabled"] else "העוזר כובה")
+                    if warning:
+                        message += ". " + warning
+                elif keypad == "3":
+                    settings = dict(_store["settings"])
+                    settings["voice_enabled"] = not voice_on()
+                    warning = persist("settings", settings)
+                    message = "המענה הקולי הופעל" if settings["voice_enabled"] else "המענה הקולי כובה"
+                    if warning:
+                        message += ". " + warning
+                elif keypad == "4":
+                    current = default_voice_index()
+                    settings = dict(_store["settings"])
+                    settings["default_voice"] = VOICES[(current + 1) % len(VOICES)]
+                    warning = persist("settings", settings)
+                    message = "הקול הוחלף"
+                    if warning:
+                        message += ". " + warning
+                elif keypad == "5":
+                    st["admin_stage"] = "chat"
+                    return Response(read_command("יצאת מתפריט הניהול. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
+                else:
+                    message = "לא זיהיתי את הבחירה"
+                return Response(admin_digits_command(admin_menu_text(message), "admin_action", 1, 1), mimetype="text/plain")
+
+        if not cfg("system_enabled") and st.get("admin_stage") != "menu":
+            return Response("id_list_message=t-העוזר אינו זמין כרגע&go_to_folder=hangup", mimetype="text/plain")
 
         # First-time callers record their name once, before the first question.
         if phone and not caller(phone).get("name"):
