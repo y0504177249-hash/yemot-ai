@@ -883,7 +883,18 @@ def generate(contents):
     )
 
 
-TTS_MODELS = [TTS_MODEL] if TTS_MODEL else ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"]
+# Prefer current stable TTS models, then fall back to supported legacy TTS endpoints
+# for API projects where the newest model has not yet propagated.
+TTS_MODELS = list(dict.fromkeys(
+    ([TTS_MODEL] if TTS_MODEL else [])
+    + [
+        "gemini-3.8-flash-lite-tts",
+        "gemini-3.8-flash-tts",
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-flash-preview-tts",
+        "gemini-2.5-pro-preview-tts",
+    ]
+))
 TTS_STYLE = "A warm, gentle, calming and reassuring voice, soft and friendly, speaking Hebrew clearly at a relaxed slightly slow pace, with natural pauses and a soothing conversational tone. Never rushed, sharp, or overly theatrical."
 YIDDISH_TTS_STYLE = "A warm, wise, reassuring Hasidic yeshiva mentor voice: calm, deeply empathetic, thoughtful and grounded, like a trusted spiritual mentor with psychological insight. Speak only natural everyday Yiddish, with authentic pronunciation, a gentle measured pace, thoughtful pauses, and sincere warmth. Do not use English, foreign loanwords, or mixed-language expressions. Avoid theatrical preaching or exaggerated emotion."
 
