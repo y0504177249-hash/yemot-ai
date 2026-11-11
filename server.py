@@ -1496,7 +1496,7 @@ def ivr():
                 st["admin_stage"] = "menu"
                 return Response(admin_digits_command(admin_menu_text("בחירה לא תקינה"), "admin_action", 1, 1), mimetype="text/plain")
             elif stage in ("block_phone", "unblock_phone"):
-                target_phone = re.sub(r"\\D", "", keypad)
+                target_phone = re.sub(r"\D", "", keypad)
                 if not target_phone.isdigit() or not 9 <= len(target_phone) <= 15:
                     st["admin_stage"] = "menu"
                     return Response(admin_digits_command(admin_menu_text("מספר הטלפון אינו תקין"), "admin_action", 1, 1), mimetype="text/plain")
