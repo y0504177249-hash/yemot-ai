@@ -369,6 +369,22 @@ def db_save_caller(phone, profile):
         conn.close()
 
 
+def db_delete_caller(phone):
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM caller_profiles WHERE phone = %s", (phone,))
+        return True
+    except Exception as e:
+        print("database caller delete failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
+
+
 def db_load_caller(phone):
     if not phone:
         return
@@ -1035,6 +1051,7 @@ def cleanup_old():
     for cid in [c for c, s in calls.items() if now - s["t"] > 3600]:
         calls.pop(cid, None)
         histories.pop(cid, None)
+        _history_loaded.discard(cid)
 
 
 @app.route("/ivr", methods=["GET", "POST"])
@@ -1049,6 +1066,7 @@ def ivr():
         with lock:
             calls.pop(call_id, None)
         histories.pop(call_id, None)
+        _history_loaded.discard(call_id)
         return Response("", mimetype="text/plain")
 
     if TEST_MODE:
@@ -1315,7 +1333,10 @@ def admin_caller_delete(phone):
     if phone not in callers:
         return jsonify({"error": "הקו לא נמצא"}), 404
     callers.pop(phone)
-    return jsonify({"ok": True, "warning": persist("callers", callers)})
+    warning = persist("callers", callers)
+    if not db_delete_caller(phone) and DATABASE_URL:
+        warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נמחקו ממסד הנתונים"
+    return jsonify({"ok": True, "warning": warning})
 
 
 @app.route("/admin/api/settings", methods=["PUT"])
