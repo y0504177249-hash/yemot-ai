@@ -500,18 +500,26 @@ def clean_for_tts(text):
     return " ".join(text.split())[:700]
 
 
+def active_record_path():
+    return getattr(_tls, "record_path", RECORD_PATH)
+
+
+def active_extension_path():
+    return getattr(_tls, "extension_path", EXTENSION_PATH)
+
+
 def read_command(prompt_text, call_id, turn):
     # מקריא טקסט ואז מקליט. ההקלטה מסתיימת בהקשת סולמית (#). שם הקובץ שונה בכל סבב.
     fname = "q" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(turn)
-    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{RECORD_PATH},{fname},no,yes,no"
+    return f"read=t-{clean_for_tts(prompt_text)}=question,no,record,{active_record_path()},{fname},no,yes,no"
 
 
 def wait_command():
     # מנגינת המתנה (או הודעה) ואז חזרה לשלוחה, שתבדוק אם התשובה מוכנה
     music = cfg("music_file")
     if music:
-        return f"id_list_message=f-{music}&go_to_folder={EXTENSION_PATH}"
-    return f"id_list_message=t-נא להמתין&go_to_folder={EXTENSION_PATH}"
+        return f"id_list_message=f-{music}&go_to_folder={active_extension_path()}"
+    return f"id_list_message=t-נא להמתין&go_to_folder={active_extension_path()}"
 
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
@@ -671,7 +679,7 @@ def download_recording(path):
         path += ".wav"
     r = requests.get(
         "https://www.call2all.co.il/ym/api/DownloadFile",
-        params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": f"ivr2:{path}"},
+        params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": f"ivr2:{active_record_path().rstrip('/')}/{path.lstrip('/')}"},
         timeout=15,
     )
     r.raise_for_status()
@@ -813,7 +821,7 @@ def upload_to_yemot(wav_bytes, name):
         "https://www.call2all.co.il/ym/api/UploadFile",
         data={
             "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
-            "path": f"ivr2:{RECORD_PATH}/{name}.wav",
+            "path": f"ivr2:{active_record_path().rstrip('/')}/{name}.wav",
             "convertAudio": "1",
         },
         files={"file": (name + ".wav", wav_bytes, "audio/wav")},
@@ -826,7 +834,7 @@ def upload_to_yemot(wav_bytes, name):
         status = None
     if status != "OK":
         raise RuntimeError(f"upload failed: {r.text[:200]}")
-    return f"{RECORD_PATH}/{name}"
+    return f"{active_record_path().rstrip('/')}/{name}"
 
 
 def make_hold_music():
@@ -1047,6 +1055,8 @@ def worker(call_id, recorded, phone="", use_yiddish=None):
     _tls.keyid = phone if phone in keys else "default"
     _tls.kind = "chat"
     _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
+    _tls.record_path = "/1/1" if _tls.yiddish else "/8"
+    _tls.extension_path = "/1/1" if _tls.yiddish else "/8"
     t0 = time.time()
     failed = False
     err = ""
@@ -1110,6 +1120,8 @@ def ivr():
     requested_lang = (p.get("lang") or "").strip().lower()
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
+    _tls.record_path = "/1/1" if use_yiddish else "/8"
+    _tls.extension_path = "/1/1" if use_yiddish else "/8"
     maybe_refresh()
     db_load_caller(phone)
 
