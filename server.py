@@ -405,6 +405,11 @@ def db_load_caller(phone):
             current["name"] = row[0] or current.get("name", "")
             current["enabled"] = bool(row[1])
             _store["callers"][phone] = current
+        else:
+            # Migrate an existing locally/webhook-stored caller profile on first contact.
+            current = _store["callers"].get(phone)
+            if current:
+                db_save_caller(phone, current)
         _caller_loaded.add(phone)
     except Exception as e:
         print("database caller load failed:", redact(e), flush=True)
