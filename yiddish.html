@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="yi" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>יידיש שמועס</title>
+<style>
+:root{color-scheme:light dark;--bg:#101a22;--panel:#1a2934;--ink:#edf4f0;--muted:#a8b8b0;--line:#354955;--accent:#8ec5a8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.65 system-ui,"Noto Sans Hebrew",Arial,sans-serif}
+main{max-width:760px;margin:auto;padding:22px 14px 36px}header{margin:8px 0 18px}h1{font-size:26px;margin:0 0 4px}p{margin:0;color:var(--muted)}
+#chat{min-height:48vh;max-height:62vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}
+.msg{padding:12px 14px;margin:9px 0;border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere;max-width:92%}
+.user{background:#294b3d;margin-right:auto}.bot{background:#263744;margin-left:auto}
+form{display:flex;gap:9px;margin-top:12px;align-items:stretch}textarea{flex:1;min-height:66px;max-height:160px;resize:vertical;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink);padding:12px;font:inherit}
+button{border:0;border-radius:12px;background:var(--accent);color:#11251b;padding:10px 18px;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:wait}
+#status{min-height:28px;margin-top:8px;font-size:14px;color:var(--muted)}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.top a{color:var(--accent);text-decoration:none}
+</style></head>
+<body><main>
+<header class="top"><div><h1>לאמיר שמועסן אויף יידיש</h1><p>שרייב דיין שאלה, און דער אסיסטענט וועט ענטפערן אין גערעדטער יידיש — אויך מיט קול.</p></div><a href="/admin">ניהול</a></header>
+<div id="chat" aria-live="polite"><div class="msg bot">שלום! איך בין גרייט צו רעדן מיט דיר אויף יידיש. וואס ליגט דיר אויפן הארץ?</div></div>
+<form id="form"><textarea id="message" maxlength="2000" placeholder="שרייב דא אין יידיש..." required></textarea><button id="send">שיק</button></form>
+<div id="status" role="status"></div>
+</main>
+<script>
+(function(){
+ const chat=document.getElementById('chat'),form=document.getElementById('form'),input=document.getElementById('message'),send=document.getElementById('send'),status=document.getElementById('status');
+ const history=[];
+ function bubble(role,text){const el=document.createElement('div');el.className='msg '+(role==='user'?'user':'bot');el.textContent=text;chat.appendChild(el);chat.scrollTop=chat.scrollHeight;}
+ form.addEventListener('submit',async function(e){
+  e.preventDefault();const message=input.value.trim();if(!message)return;
+  bubble('user',message);input.value='';send.disabled=true;status.textContent='א מינוט...';
+  try{
+   const res=await fetch('/admin/api/yiddish/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'admin'},body:JSON.stringify({message,history})});
+   const data=await res.json();if(!res.ok)throw new Error(data.error||'עס איז געשען א טעות');
+   bubble('model',data.answer);history.push({role:'user',text:message},{role:'model',text:data.answer});if(history.length>12)history.splice(0,history.length-12);
+   if(data.audio){const audio=new Audio('data:audio/wav;base64,'+data.audio);audio.play().catch(()=>{status.textContent='דער טעקסט איז דא; קול קען מען נישט שפילן אין דעם בלעטערער.';});}
+   status.textContent='';
+  }catch(err){status.textContent=err.message;}
+  finally{send.disabled=false;input.focus();}
+ });
+})();
+</script></body></html>
