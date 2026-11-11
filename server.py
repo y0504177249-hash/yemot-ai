@@ -1513,7 +1513,7 @@ def admin_transcripts():
     date_from = request.args.get("from", "").strip()
     date_to = request.args.get("to", "").strip()
     try:
-        limit = min(200, max(1, int(request.args.get("limit", "100"))))
+        limit = min(1000, max(1, int(request.args.get("limit", "500"))))
     except ValueError:
         limit = 100
     conn = db_connect()
