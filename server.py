@@ -154,6 +154,8 @@ def settings_defaults():
         "voice_enabled": VOICE_ENABLED,
         "default_voice": VOICES[0],
         "music_file": MUSIC_FILE,
+        "music_file_he": "",
+        "music_file_yi": "",
         "mail_mode": "all" if ALLOW_ALL_PHONES else ("listed" if ALLOWED_PHONES else "off"),
         "mail_contacts": MAIL_CONTACTS,
         "greeting": DEFAULT_GREETING,
@@ -593,7 +595,7 @@ def read_command(prompt_text, call_id, turn):
 
 def wait_command():
     # מנגינת המתנה (או הודעה) ואז חזרה לשלוחה, שתבדוק אם התשובה מוכנה
-    music = cfg("music_file")
+    music = cfg("music_file_yi" if yiddish_mode() else "music_file_he") or cfg("music_file")
     if music:
         return f"id_list_message=f-{music}&go_to_folder={active_extension_path()}"
     return f"id_list_message=t-נא להמתין&go_to_folder={active_extension_path()}"
@@ -1845,6 +1847,42 @@ def admin_caller_delete(phone):
     if not db_delete_caller(phone) and DATABASE_URL:
         warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נמחקו ממסד הנתונים"
     return jsonify({"ok": True, "warning": warning})
+
+
+@app.route("/admin/api/music/upload", methods=["POST"])
+@admin_required
+def admin_music_upload():
+    language = request.args.get("lang", "he")
+    if language not in ("he", "yi"):
+        return jsonify({"error": "בחירת שפה לא תקינה"}), 400
+    audio = request.files.get("file")
+    if not audio or not audio.filename or not audio.filename.lower().endswith(".mp3"):
+        return jsonify({"error": "יש לבחור קובץ MP3"}), 400
+    data = audio.read(15 * 1024 * 1024 + 1)
+    if not data or len(data) > 15 * 1024 * 1024:
+        return jsonify({"error": "הקובץ ריק או גדול מ־15MB"}), 400
+    folder = "/1/1" if language == "yi" else "/8"
+    target = f"ivr2:{folder}/hold_music.wav"
+    try:
+        response = requests.post(
+            "https://www.call2all.co.il/ym/api/UploadFile",
+            data={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": target, "convertAudio": "1"},
+            files={"file": ("hold_music.mp3", data, "audio/mpeg")},
+            timeout=90,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("responseStatus") != "OK":
+            raise RuntimeError(result.get("message", "Yemot upload failed"))
+        new = dict(_store["settings"])
+        new["music_file_" + language] = folder + "/hold_music"
+        warning = persist("settings", new)
+        if warning:
+            return jsonify({"ok": True, "warning": warning, "path": target})
+        return jsonify({"ok": True, "path": target})
+    except Exception as e:
+        print("admin music upload failed:", redact(e), flush=True)
+        return jsonify({"error": "העלאת המנגינה נכשלה. בדוק את החיבור לימות המשיח ונסה שוב."}), 502
 
 
 @app.route("/admin/api/settings", methods=["PUT"])
