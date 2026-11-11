@@ -1291,6 +1291,24 @@ def admin_caller_put():
     return jsonify({"ok": True, "warning": warning})
 
 
+@app.route("/admin/api/database")
+@admin_required
+def admin_database_status():
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"connected": False, "error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT (SELECT count(*) FROM caller_profiles), (SELECT count(*) FROM call_transcripts), now()")
+            row = cur.fetchone()
+        return jsonify({"connected": True, "caller_profiles": row[0], "transcripts": row[1], "checked_at": row[2].isoformat()})
+    except Exception as e:
+        print("database status failed:", redact(e), flush=True)
+        return jsonify({"connected": False, "error": "בדיקת מסד הנתונים נכשלה"}), 503
+    finally:
+        conn.close()
+
+
 @app.route("/admin/api/transcripts")
 @admin_required
 def admin_transcripts():
