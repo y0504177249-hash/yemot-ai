@@ -1153,7 +1153,7 @@ app.secret_key = hashlib.sha256(
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=12 * 3600,
 )
 ADMIN_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
