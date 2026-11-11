@@ -199,10 +199,26 @@ def default_voice_index():
 
 
 def redact(text):
+    # Redact credentials before anything reaches Render logs or admin errors.
     text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[מפתח]", str(text))
-    for k in list(all_keys().values()) + [GEMINI_API_KEY]:
-        if k and len(k) > 8:
-            text = text.replace(k, "[מפתח]")
+    secrets = [
+        YEMOT_PASSWORD,
+        MAIL_WEBHOOK_SECRET,
+        BREVO_API_KEY,
+        GOOGLE_CLIENT_SECRET,
+        ADMIN_PASSWORD if "ADMIN_PASSWORD" in globals() else "",
+        GEMINI_KEY_ENCRYPTION_KEY if "GEMINI_KEY_ENCRYPTION_KEY" in globals() else "",
+        GEMINI_API_KEY,
+    ]
+    try:
+        secrets.extend(all_keys().values())
+    except Exception:
+        pass
+    for secret in secrets:
+        if secret and len(secret) >= 6:
+            text = text.replace(secret, "[סוד]")
+    # Hide credentials that appear as query/form parameters in HTTP exceptions.
+    text = re.sub(r"(?i)(token|password|secret|api[_-]?key)=([^&\\s'\"]+)", r"\1=[מוסתר]", text)
     return text
 
 
