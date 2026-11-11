@@ -80,6 +80,7 @@
 (function () {
   var app = document.getElementById('app');
   var S = null;
+  var googleLoginEnabled = false;
   var note = document.createElement('p');
   note.className = 'note'; note.setAttribute('role', 'status');
 
@@ -127,6 +128,12 @@
   function showLogin(msg) {
     var pw = h('input', { type: 'password', id: 'pw', autocomplete: 'current-password' });
     var out = h('p', { class: 'note bad', role: 'status' }, msg || '');
+    var kids = [
+      h('h1', null, 'ניהול העוזר הקולי')
+    ];
+    if (googleLoginEnabled) {
+      kids.push(h('a', { href: '/admin/google/login', style: 'display:block; text-align:center; text-decoration:none; background:var(--act); color:var(--act-ink); border-radius:8px; padding:10px 14px; margin-top:14px; min-height:44px' }, 'התחברות עם Google'));
+    }
     var go = function (ev) {
       ev.preventDefault();
       fetch('/admin/login', {
@@ -138,11 +145,13 @@
           if (a[0].ok) load(); else out.textContent = a[1].error || 'הכניסה נכשלה';
         });
     };
-    app.replaceChildren(h('form', { class: 'login', onsubmit: go },
-      h('h1', null, 'ניהול העוזר הקולי'),
+    var formKids = kids.slice();
+    if (true) formKids.push(
       h('label', { class: 'f', for: 'pw' }, 'סיסמת ניהול'),
       pw, out,
-      h('div', { class: 'bar' }, h('button', { type: 'submit' }, 'כניסה'))));
+      h('div', { class: 'bar' }, h('button', { type: 'submit' }, 'כניסה'))
+    );
+    app.replaceChildren(h('form', { class: 'login', onsubmit: go }, formKids));
     pw.focus();
   }
 
@@ -356,6 +365,50 @@
         h('tbody', null, rows))) : h('p', { class: 'sub', style: 'margin-top:10px' }, 'עוד אין שיחות מאז הפעלת השרת. חייג למספר והקש 8.'));
   }
 
+
+  function keyPoolPanel() {
+    var label = h('input', { type: 'text', placeholder: 'תיאור המפתח (למשל קו א)' });
+    var key = h('textarea', { placeholder: 'הדבק כאן מפתח Gemini', rows: 2 });
+    var status = h('p', { class: 'sub' }, 'המפתחות נשמרים מוצפנים. הערך המלא לא יוצג לאחר השמירה.');
+    var rows = h('div', null);
+    function load() {
+      api('GET', 'state').then(function (d) {
+        rows.replaceChildren();
+        (d.key_pool || []).forEach(function (k) {
+          var line = h('article', { class: 'line' },
+            h('div', null,
+              h('strong', null, k.label || 'ללא תיאור'),
+              h('div', { class: 'sub' }, 'מזהה: ' + k.fingerprint + ' · ' + (k.assigned_phone ? 'מוקצה לקו ' + k.assigned_phone : 'פנוי') + (k.disabled ? ' · מושבת' : ''))
+            ),
+            h('button', { class: 'quiet', onclick: function () {
+              api('PUT', 'key_pool/' + k.id, { disabled: !k.disabled }).then(load).catch(function (e) { status.textContent = e.message; });
+            } }, k.disabled ? 'הפעל' : 'השבת')
+          );
+          rows.append(line);
+        });
+        if (!d.key_pool || !d.key_pool.length) rows.append(h('p', { class: 'sub' }, d.key_pool_error || 'המאגר עדיין ריק.'));
+      }).catch(function (e) { status.textContent = e.message; });
+    }
+    function add() {
+      var value = key.value.trim();
+      if (!value) { status.textContent = 'יש להדביק מפתח לפני השמירה.'; return; }
+      status.textContent = 'שומר מפתח מוצפן...';
+      api('POST', 'key_pool', { label: label.value.trim(), key: value }).then(function () {
+        key.value = ''; label.value = '';
+        status.textContent = 'המפתח נשמר במאגר באופן מוצפן.';
+        load();
+      }).catch(function (e) { status.textContent = e.message; });
+    }
+    load();
+    return h('section', null,
+      h('h2', null, 'מאגר מפתחות Gemini'),
+      h('p', { class: 'sub' }, 'הוסף מפתחות API לשימוש עתידי. מפתחות מוצפנים במסד הנתונים ואינם נחשפים בממשק.'),
+      h('label', { class: 'f' }, 'תיאור'), label,
+      h('label', { class: 'f' }, 'מפתח API'), key,
+      h('div', { class: 'bar' }, h('button', { onclick: add }, 'הוסף מפתח למאגר')),
+      status, rows);
+  }
+
   function databasePanel() {
     var box = h('section', null,
       h('h2', null, 'חיבור למסד הנתונים'),
@@ -371,12 +424,13 @@
     return box;
   }
 
-  function render() { app.replaceChildren(header(), callersPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
+  function render() { app.replaceChildren(header(), callersPanel(), keyPoolPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
   function load() {
     return api('GET', 'state').then(function (j) { S = j; render(); }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
 
   fetch('/admin/api/whoami', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (j) {
+    googleLoginEnabled = !!j.google_enabled;
     if (!j.enabled) { app.replaceChildren(h('div', { class: 'login' }, h('h1', null, 'ניהול העוזר הקולי'), h('p', { class: 'sub' }, 'ממשק הניהול כבוי. הגדר ב-Render משתנה סביבה בשם ADMIN_PASSWORD כדי להפעיל אותו.'))); return; }
     if (j.auth) load(); else showLogin();
   });

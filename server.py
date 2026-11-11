@@ -12,6 +12,7 @@ import functools
 import threading
 import collections
 import requests
+from urllib.parse import urlencode
 try:
     import psycopg
 except ImportError:
@@ -19,6 +20,13 @@ except ImportError:
 from flask import Flask, request, Response, session, jsonify, send_file
 from google import genai
 from google.genai import types
+from cryptography.fernet import Fernet
+try:
+    from google.oauth2 import id_token as google_id_token
+    from google.auth.transport import requests as google_auth_requests
+except ImportError:
+    google_id_token = None
+    google_auth_requests = None
 
 # ---- הגדרות מתוך משתני סביבה (לא לשמור סיסמאות בקוד) ----
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
@@ -302,6 +310,12 @@ _tls = threading.local()
 
 def client_for(phone):
     key = all_keys().get(phone)
+    if not key:
+        try:
+            key = key_pool_assign(phone)
+        except Exception as e:
+            print("key pool assignment failed:", redact(e), flush=True)
+            key = ""
     if not key:
         return client
     if key not in _clients:
@@ -1131,13 +1145,23 @@ def ivr():
 
 # ---------------- ממשק ניהול ----------------
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_ADMIN_EMAIL = os.environ.get("GOOGLE_ADMIN_EMAIL", "y0504177249@gmail.com").strip().lower()
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
+GOOGLE_LOGIN_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI and google_id_token and google_auth_requests)
+GEMINI_KEY_ENCRYPTION_KEY = os.environ.get("GEMINI_KEY_ENCRYPTION_KEY", "").strip()
+
+
+def admin_auth_enabled():
+    return bool(ADMIN_PASSWORD or GOOGLE_LOGIN_ENABLED)
 app.secret_key = hashlib.sha256(
     ("sess|" + ADMIN_PASSWORD + "|" + MAIL_WEBHOOK_SECRET + "|" + YEMOT_PASSWORD).encode("utf-8")
 ).hexdigest()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=12 * 3600,
 )
 ADMIN_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
@@ -1176,7 +1200,7 @@ def login_blocked(ip):
 def admin_required(f):
     @functools.wraps(f)
     def wrapper(*a, **k):
-        if not ADMIN_PASSWORD or not session.get("admin"):
+        if not admin_auth_enabled() or not session.get("admin"):
             return jsonify({"error": "נדרשת כניסה"}), 401
         if request.method != "GET" and request.headers.get("X-Requested-With") != "admin":
             return jsonify({"error": "בקשה לא תקינה"}), 403
@@ -1193,7 +1217,67 @@ def admin_page():
 
 @app.route("/admin/api/whoami")
 def admin_whoami():
-    return jsonify({"enabled": bool(ADMIN_PASSWORD), "auth": bool(session.get("admin"))})
+    return jsonify({"enabled": admin_auth_enabled(), "auth": bool(session.get("admin")), "google_enabled": GOOGLE_LOGIN_ENABLED})
+
+
+@app.route("/admin/google/login")
+def admin_google_login():
+    if not GOOGLE_LOGIN_ENABLED:
+        return Response("התחברות Google עדיין לא הוגדרה בשרת", status=503, mimetype="text/plain")
+    state = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+    session["google_oauth_state"] = state
+    session.permanent = True
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    }
+    return Response(status=302, headers={"Location": "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)})
+
+
+@app.route("/admin/google/callback")
+def admin_google_callback():
+    if not GOOGLE_LOGIN_ENABLED:
+        return Response("התחברות Google עדיין לא הוגדרה בשרת", status=503, mimetype="text/plain")
+    expected = session.pop("google_oauth_state", "")
+    supplied = request.args.get("state", "")
+    code = request.args.get("code", "")
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied) or not code:
+        return Response("בקשת התחברות לא תקינה. חזור למסך הכניסה.", status=400, mimetype="text/plain")
+    try:
+        token_response = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=15,
+        )
+        token_response.raise_for_status()
+        id_token_value = token_response.json().get("id_token", "")
+        if not id_token_value:
+            raise ValueError("missing id_token")
+        claims = google_id_token.verify_oauth2_token(
+            id_token_value, google_auth_requests.Request(), GOOGLE_CLIENT_ID
+        )
+        email = str(claims.get("email", "")).strip().lower()
+        if not claims.get("email_verified") or not email or not hmac.compare_digest(email, GOOGLE_ADMIN_EMAIL):
+            print("Google admin login denied", flush=True)
+            return Response("חשבון Google זה אינו מורשה לניהול.", status=403, mimetype="text/plain")
+        session.clear()
+        session["admin"] = True
+        session["admin_email"] = email
+        session.permanent = True
+        return Response(status=302, headers={"Location": "/admin"})
+    except Exception as e:
+        print("Google OAuth callback failed:", str(e)[:200], flush=True)
+        return Response("ההתחברות עם Google נכשלה. נסה שוב.", status=400, mimetype="text/plain")
 
 
 @app.route("/admin/login", methods=["POST"])
@@ -1201,7 +1285,7 @@ def admin_login():
     if request.headers.get("X-Requested-With") != "admin":
         return jsonify({"error": "בקשה לא תקינה"}), 403
     if not ADMIN_PASSWORD:
-        return jsonify({"error": "ממשק הניהול כבוי"}), 403
+        return jsonify({"error": "כניסה בסיסמה אינה מוגדרת. השתמש בהתחברות Google."}), 403
     ip = client_ip()
     if login_blocked(ip):
         return jsonify({"error": "יותר מדי ניסיונות. נסה שוב בעוד כמה דקות"}), 429
@@ -1226,6 +1310,66 @@ def admin_logout():
     return jsonify({"ok": True})
 
 
+def key_cipher():
+    if not GEMINI_KEY_ENCRYPTION_KEY:
+        raise RuntimeError('מפתח הצפנה חסר')
+    return Fernet(GEMINI_KEY_ENCRYPTION_KEY.encode('ascii'))
+
+def key_pool_list():
+    conn = db_connect()
+    if conn is None: raise RuntimeError('מסד הנתונים אינו מחובר')
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT id, label, key_fingerprint, assigned_phone, created_at, assigned_at, disabled FROM gemini_key_pool ORDER BY id DESC')
+            return cur.fetchall()
+    finally: conn.close()
+
+def key_pool_add(label, key):
+    conn = db_connect()
+    if conn is None: raise RuntimeError('מסד הנתונים אינו מחובר')
+    encrypted = key_cipher().encrypt(key.encode('utf-8')).decode('ascii')
+    fingerprint = hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute('INSERT INTO gemini_key_pool (label, encrypted_key, key_fingerprint) VALUES (%s,%s,%s) ON CONFLICT (key_fingerprint) DO NOTHING RETURNING id', (label[:80], encrypted, fingerprint))
+                return bool(cur.fetchone())
+    finally: conn.close()
+
+
+def key_pool_assign(phone):
+    conn = db_connect()
+    if conn is None: raise RuntimeError("מסד הנתונים אינו מחובר")
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT encrypted_key FROM gemini_key_pool WHERE assigned_phone=%s AND NOT disabled FOR UPDATE", (phone,))
+                row = cur.fetchone()
+                if not row:
+                    cur.execute("SELECT id, encrypted_key FROM gemini_key_pool WHERE assigned_phone IS NULL AND NOT disabled ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1")
+                    row = cur.fetchone()
+                    if row:
+                        cur.execute("UPDATE gemini_key_pool SET assigned_phone=%s, assigned_at=now() WHERE id=%s", (phone, row[0]))
+                        encrypted = row[1]
+                    else:
+                        encrypted = None
+                else:
+                    encrypted = row[0]
+        return key_cipher().decrypt(encrypted.encode("ascii")).decode("utf-8") if encrypted else ""
+    finally:
+        conn.close()
+
+
+def key_pool_disable(key_id, disabled):
+    conn = db_connect()
+    if conn is None: raise RuntimeError('מסד הנתונים אינו מחובר')
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE gemini_key_pool SET disabled=%s WHERE id=%s', (bool(disabled), key_id))
+                return cur.rowcount > 0
+    finally: conn.close()
+
 def key_mask(k):
     return ("••••" + k[-4:]) if k else ""
 
@@ -1246,7 +1390,16 @@ def admin_state():
             "mail": bool(c.get("mail")), "enabled": c.get("enabled", True),
             "state": quota_state(ph if key else "default"),
         })
+    try:
+        pool_rows = key_pool_list()
+        key_pool = [{"id": x[0], "label": x[1], "fingerprint": x[2], "assigned_phone": x[3],
+                     "created_at": x[4].isoformat(), "assigned_at": x[5].isoformat() if x[5] else None,
+                     "disabled": x[6]} for x in pool_rows]
+        key_pool_error = ""
+    except Exception as e:
+        key_pool, key_pool_error = [], str(e)[:100]
     return jsonify({
+        "key_pool": key_pool, "key_pool_error": key_pool_error,
         "uptime": now - START_TIME,
         "active_calls": sum(1 for x in calls.values() if now - x["t"] < 120),
         "store": {"source": _store["source"], "error": _store["error"]},
@@ -1290,6 +1443,31 @@ def admin_caller_put():
         warning = (warning + " | " if warning else "") + "פרטי המתקשר לא נשמרו במסד הנתונים"
     return jsonify({"ok": True, "warning": warning})
 
+
+@app.route("/admin/api/key_pool", methods=["POST"])
+@admin_required
+def admin_key_pool_add():
+    d = request.get_json(silent=True) or {}
+    key = str(d.get('key', '')).strip().replace(' ', '').replace(chr(10), '').replace(chr(13), '')
+    label = str(d.get('label', '')).strip()[:80]
+    if not re.fullmatch(r'[A-Za-z0-9._-]{20,200}', key): return jsonify({'error': 'מפתח Gemini לא תקין'}), 400
+    try:
+        if not key_pool_add(label, key): return jsonify({'error': 'המפתח כבר קיים'}), 409
+        return jsonify({'ok': True})
+    except Exception as e:
+        print('key pool add failed:', redact(e), flush=True)
+        return jsonify({'error': 'שמירת המפתח נכשלה. בדוק חיבור והצפנה.'}), 503
+
+@app.route("/admin/api/key_pool/<int:key_id>", methods=["PUT"])
+@admin_required
+def admin_key_pool_update(key_id):
+    d = request.get_json(silent=True) or {}
+    try:
+        if not key_pool_disable(key_id, d.get('disabled')): return jsonify({'error': 'המפתח לא נמצא'}), 404
+        return jsonify({'ok': True})
+    except Exception as e:
+        print('key pool update failed:', redact(e), flush=True)
+        return jsonify({'error': 'עדכון המפתח נכשל'}), 503
 
 @app.route("/admin/api/database")
 @admin_required
