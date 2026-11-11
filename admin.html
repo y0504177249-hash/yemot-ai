@@ -296,7 +296,6 @@
       music: h('input', { type: 'text', id: 'smu', value: s.music_file, autocomplete: 'off', placeholder: 'נתיב ישן (אופציונלי)' }),
       musicHe: h('input', { type: 'file', id: 'smh', accept: '.mp3,audio/mpeg' }),
       musicYi: h('input', { type: 'file', id: 'smy', accept: '.mp3,audio/mpeg' }),
-      greet: h('textarea', { id: 'sg' }, s.greeting),
       extra: h('textarea', { id: 'se' }, s.extra_instructions)
     };
     var save = function () {
@@ -312,7 +311,7 @@
         return api('PUT', 'settings', {
           model: el.model.value.trim(), voice_enabled: el.voice.checked, default_voice: el.dvoice.value,
           mail_mode: el.mode.value, mail_contacts: contacts, music_file: el.music.value.trim(),
-          greeting: el.greet.value.trim(), extra_instructions: el.extra.value.trim()
+          extra_instructions: el.extra.value.trim()
         });
       });
     };
@@ -333,7 +332,6 @@
       h('label', { class: 'f', for: 'smy' }, 'מנגינת המתנה – שלוחה 1.1 (יידיש)'), el.musicYi,
       h('button', { type: 'button', onclick: function () { uploadMusic(el.musicYi, 'yi'); } }, 'העלאת מנגינה ליידיש'),
       h('label', { class: 'f', for: 'smu' }, 'נתיב מנגינה ישן (אופציונלי)'), el.music,
-      h('label', { class: 'f', for: 'sg' }, 'ברכת פתיחה'), el.greet,
       h('label', { class: 'f', for: 'se' }, 'הנחיות נוספות לעוזר', h('span', { class: 'sub' }, 'למשל סגנון דיבור או נושאים להימנע מהם. עד 600 תווים.')), el.extra,
       h('div', { class: 'bar' }, h('button', { onclick: save }, 'שמירת הגדרות')));
     return h('section', null, kids);
