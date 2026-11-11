@@ -1386,7 +1386,7 @@ def ivr():
         st["t"] = time.time()
 
         # Phone admin entry is offered only on Hebrew extension 8 and only to mail-authorized callers.
-        if not use_yiddish and phone and phone_allowed(phone):
+        if not use_yiddish and phone and EMAIL_ENABLED and phone_allowed(phone):
             stage = st.get("admin_stage")
             if stage is None:
                 st["admin_stage"] = "code"
