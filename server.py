@@ -1325,18 +1325,22 @@ def ivr():
                     history.append(types.Content(role="model", parts=[types.Part(text=old_answer)]))
             history[:] = history[-12:]
             _history_loaded.add(call_id)
+        previous_answer = previous_turns[-1][1].strip() if previous_turns else ""
+        topic_for_greeting = clean_for_tts(previous_topic)[:110]
+        answer_for_greeting = clean_for_tts(previous_answer)[:110]
         if use_yiddish:
-            st.setdefault("opening_greeting", (
-                "שלום! לעצטע מאל האבן מיר גערעדט וועגן " + previous_topic + ". איך פריי זיך ממשיך צו רעדן מיט דיר. וואס ווילסטו היינט רעדן?"
-                if previous_topic else
-                "שלום! איך בין אפן צו רעדן מיט דיר וועגן יעדן נושא אויף דער וועלט. וועגן וואס ווילסטו רעדן?"
-            ))
+            if topic_for_greeting:
+                context = " און מיר האבן גערעדט וועגן " + answer_for_greeting if answer_for_greeting else ""
+                greeting = "שלום! לעצטע מאל האסטו געפרעגט וועגן " + topic_for_greeting + context + ". ווילסטו ממשיך זיין פון דארט, אדער רעדן וועגן עפעס ניי?"
+            else:
+                greeting = "שלום! איך בין דא דיר אויסצוהערן און העלפן. וועגן וואס ווילסטו היינט רעדן?"
         else:
-            st.setdefault("opening_greeting", (
-                "שלום, בפעם הקודמת דיברנו על " + previous_topic + ". שמח להמשיך איתך. על מה תרצה לדבר היום?"
-                if previous_topic else
-                "שלום, אני פתוח לדבר איתך על כל נושא שבעולם. על מה תרצה לדבר?"
-            ))
+            if topic_for_greeting:
+                context = " ודיברנו גם על " + answer_for_greeting if answer_for_greeting else ""
+                greeting = "שלום, בפעם הקודמת שאלת על " + topic_for_greeting + context + ". נרצה להמשיך מאותה נקודה, או שיש משהו חדש שתרצה לדבר עליו?"
+            else:
+                greeting = "שלום, אני כאן להקשיב ולעזור. על מה תרצה לדבר היום?"
+        st.setdefault("opening_greeting", greeting)
         st["t"] = time.time()
 
         # First-time callers record their name once, before the first question.
