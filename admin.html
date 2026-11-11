@@ -290,6 +290,53 @@
     return h('section', null, kids);
   }
 
+  /* ---------- ארכיון תמלולים ---------- */
+  function transcriptsPanel() {
+    var phone = h('input', { type: 'text', placeholder: 'מספר טלפון', inputmode: 'numeric' });
+    var name = h('input', { type: 'text', placeholder: 'שם מתקשר' });
+    var from = h('input', { type: 'date', 'aria-label': 'מתאריך' });
+    var to = h('input', { type: 'date', 'aria-label': 'עד תאריך' });
+    var results = h('div', { class: 'sub' }, 'הזן מסנן ולחץ על חיפוש כדי להציג תמלולים.');
+    var search = function () {
+      results.replaceChildren(h('p', { class: 'sub' }, 'מחפש...'));
+      var q = new URLSearchParams();
+      if (phone.value.trim()) q.set('phone', phone.value.trim());
+      if (name.value.trim()) q.set('name', name.value.trim());
+      if (from.value) q.set('from', from.value);
+      if (to.value) q.set('to', to.value);
+      q.set('limit', '100');
+      api('GET', 'transcripts?' + q.toString()).then(function (data) {
+        results.replaceChildren();
+        if (!data.items.length) { results.append(h('p', { class: 'sub' }, 'לא נמצאו תמלולים מתאימים.')); return; }
+        data.items.forEach(function (item) {
+          var date = new Date(item.created_at).toLocaleString('he-IL');
+          results.append(h('article', { class: 'line' },
+            h('span', { class: 'lamp ok', 'aria-hidden': 'true' }),
+            h('div', null,
+              h('div', { class: 'ident' },
+                h('strong', null, item.name || 'ללא שם'),
+                h('span', { class: 'num' }, item.phone),
+                h('span', { class: 'sub' }, date)),
+              h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המתקשר: ' + item.heard),
+              h('p', { style: 'margin-top:6px; white-space:pre-wrap' }, 'העוזר: ' + item.answer)
+            )));
+        });
+      }).catch(function (e) {
+        results.replaceChildren(h('p', { class: 'note bad' }, e.message));
+      });
+    };
+    return h('section', null,
+      h('h2', null, 'ארכיון תמלולים'),
+      h('p', { class: 'sub' }, 'חיפוש לפי מספר, שם וטווח תאריכים. התוצאות מוצגות רק למנהל המחובר.'),
+      h('div', { class: 'add' },
+        h('div', null, h('label', { class: 'sub' }, 'מספר טלפון'), phone),
+        h('div', null, h('label', { class: 'sub' }, 'שם'), name),
+        h('div', null, h('label', { class: 'sub' }, 'מתאריך'), from),
+        h('div', null, h('label', { class: 'sub' }, 'עד תאריך'), to),
+        h('button', { onclick: search }, 'חיפוש')),
+      results);
+  }
+
   /* ---------- יומן ---------- */
   function eventsPanel() {
     var rows = S.events.map(function (e) {
@@ -309,7 +356,7 @@
         h('tbody', null, rows))) : h('p', { class: 'sub', style: 'margin-top:10px' }, 'עוד אין שיחות מאז הפעלת השרת. חייג למספר והקש 8.'));
   }
 
-  function render() { app.replaceChildren(header(), callersPanel(), settingsPanel(), eventsPanel()); }
+  function render() { app.replaceChildren(header(), callersPanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
   function load() {
     return api('GET', 'state').then(function (j) { S = j; render(); }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
