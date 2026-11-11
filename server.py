@@ -5,6 +5,7 @@ import wave
 import math
 import json
 import time
+import base64
 import hmac
 import hashlib
 import functools
@@ -610,19 +611,17 @@ def tts_wav(text, voice):
         if _is_bad(name):
             continue
         for with_style in (True, False):
-            part = {"text": text}
+            item = {"type": "text", "text": text}
             if with_style:
-                part["speech_metadata"] = {"style": TTS_STYLE}
+                item["annotations"] = [{"type": "speech_metadata", "style": TTS_STYLE}]
             try:
-                res = cur_client().models.generate_content(
+                res = cur_client().interactions.create(
                     model=name,
-                    contents=[{"role": "user", "parts": [part]}],
-                    config={
-                        "response_modalities": ["AUDIO"],
-                        "speech_config": {"voice_config": {"voice": voice}},
-                    },
+                    input=[{"type": "user_input", "content": [item]}],
+                    response_format={"type": "audio"},
+                    generation_config={"speech_config": [{"voice": voice}]},
                 )
-                data = res.candidates[0].content.parts[0].inline_data.data
+                data = base64.b64decode(res.output_audio.data)
                 if data[:4] == b"RIFF":  # הבקשה מחזירה כבר קובץ WAV שלם
                     return data
                 buf = io.BytesIO()
@@ -1119,10 +1118,10 @@ def admin_state():
 @admin_required
 def admin_caller_put():
     d = request.get_json(silent=True) or {}
-    phone = str(d.get("phone", "")).strip()
+    phone = re.sub(r"[\s\-()+]", "", str(d.get("phone", "")))
     if not re.fullmatch(r"\d{5,15}", phone):
         return jsonify({"error": "מספר טלפון לא תקין (ספרות בלבד)"}), 400
-    key = str(d.get("key", "")).strip()
+    key = re.sub(r"[\s\"'`]", "", str(d.get("key", "")))
     if key and not re.fullmatch(r"[A-Za-z0-9._-]{20,200}", key):
         return jsonify({"error": "המפתח לא נראה תקין. העתק אותו שוב במלואו"}), 400
     callers = {k: dict(v) for k, v in _store["callers"].items()}
