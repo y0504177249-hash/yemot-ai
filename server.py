@@ -1100,6 +1100,11 @@ def ivr():
     recorded_all = p.getlist("question")
     recorded = recorded_all[-1] if recorded_all else None
 
+    # Load caller history once at the start of each new call, outside the global lock.
+    is_new_call = call_id not in calls
+    previous_turns = db_load_history(phone) if is_new_call and phone else []
+    previous_topic = previous_turns[-1][0].strip() if previous_turns else ""
+
     with lock:
         cleanup_old()
         st = calls.setdefault(
@@ -1107,6 +1112,19 @@ def ivr():
             {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
              "voice": default_voice_index(), "audio": None},
         )
+        if is_new_call and call_id not in _history_loaded:
+            history = histories.setdefault(call_id, [])
+            for old_heard, old_answer in previous_turns:
+                if old_heard:
+                    history.append(types.Content(role="user", parts=[types.Part(text=old_heard)]))
+                    history.append(types.Content(role="model", parts=[types.Part(text=old_answer)]))
+            history[:] = history[-12:]
+            _history_loaded.add(call_id)
+        st.setdefault("opening_greeting", (
+            "שלום, בפעם הקודמת דיברנו על " + previous_topic + ". שמח להמשיך איתך. על מה תרצה לדבר היום?"
+            if previous_topic else
+            "שלום, אני פתוח לדבר איתך על כל נושא שבעולם. על מה תרצה לדבר?"
+        ))
         st["t"] = time.time()
 
         # הקלטה חדשה שעדיין לא טופלה: מתחילים עיבוד ברקע ומשמיעים המתנה
@@ -1139,8 +1157,8 @@ def ivr():
             text = st["answer"] + " לשאלה נוספת דבר ובסיום הקש סולמית"
             return Response(read_command(text, call_id, st["turn"]), mimetype="text/plain")
 
-        # כניסה ראשונה לשלוחה
-        return Response(read_command(cfg("greeting") or DEFAULT_GREETING, call_id, st["turn"]), mimetype="text/plain")
+        # Personalized opening for returning callers, general invitation for first-time callers.
+        return Response(read_command(st.get("opening_greeting") or cfg("greeting") or DEFAULT_GREETING, call_id, st["turn"]), mimetype="text/plain")
 
 
 # ---------------- ממשק ניהול ----------------
