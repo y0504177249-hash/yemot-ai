@@ -896,13 +896,13 @@ def do_lookup(lookup, heard):
 
 def ask_gemini(call_id, audio_bytes, phone=""):
     history = histories.setdefault(call_id, [])
-    if phone and phone not in _history_loaded:
+    if phone and call_id not in _history_loaded:
         for heard_old, answer_old in db_load_history(phone):
             if heard_old:
                 history.append(types.Content(role="user", parts=[types.Part(text=heard_old)]))
                 history.append(types.Content(role="model", parts=[types.Part(text=answer_old)]))
         history[:] = history[-12:]
-        _history_loaded.add(phone)
+        _history_loaded.add(call_id)
     parts = [types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")]
     with lock:
         st0 = calls.get(call_id)
