@@ -311,6 +311,12 @@ _tls = threading.local()
 def client_for(phone):
     key = all_keys().get(phone)
     if not key:
+        try:
+            key = key_pool_assign(phone)
+        except Exception as e:
+            print("key pool assignment failed:", redact(e), flush=True)
+            key = ""
+    if not key:
         return client
     if key not in _clients:
         _clients[key] = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=20000))
@@ -1329,6 +1335,30 @@ def key_pool_add(label, key):
                 cur.execute('INSERT INTO gemini_key_pool (label, encrypted_key, key_fingerprint) VALUES (%s,%s,%s) ON CONFLICT (key_fingerprint) DO NOTHING RETURNING id', (label[:80], encrypted, fingerprint))
                 return bool(cur.fetchone())
     finally: conn.close()
+
+
+def key_pool_assign(phone):
+    conn = db_connect()
+    if conn is None: raise RuntimeError("מסד הנתונים אינו מחובר")
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT encrypted_key FROM gemini_key_pool WHERE assigned_phone=%s AND NOT disabled FOR UPDATE", (phone,))
+                row = cur.fetchone()
+                if not row:
+                    cur.execute("SELECT id, encrypted_key FROM gemini_key_pool WHERE assigned_phone IS NULL AND NOT disabled ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1")
+                    row = cur.fetchone()
+                    if row:
+                        cur.execute("UPDATE gemini_key_pool SET assigned_phone=%s, assigned_at=now() WHERE id=%s", (phone, row[0]))
+                        encrypted = row[1]
+                    else:
+                        encrypted = None
+                else:
+                    encrypted = row[0]
+        return key_cipher().decrypt(encrypted.encode("ascii")).decode("utf-8") if encrypted else ""
+    finally:
+        conn.close()
+
 
 def key_pool_disable(key_id, disabled):
     conn = db_connect()
