@@ -2,3 +2,4 @@ flask
 requests
 google-genai>=2.25.0
 gunicorn
+psycopg[binary]>=3.2,<4
