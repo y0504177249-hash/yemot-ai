@@ -1862,12 +1862,12 @@ def admin_music_upload():
     if not data or len(data) > 15 * 1024 * 1024:
         return jsonify({"error": "הקובץ ריק או גדול מ־15MB"}), 400
     folder = "/1/1" if language == "yi" else "/8"
-    target = f"ivr2:{folder}"
+    target = f"ivr2:{folder}/hold_music.wav"
     try:
         response = requests.post(
             "https://www.call2all.co.il/ym/api/UploadFile",
-            data={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": target},
-            files={"fileToUpload": ("hold_music.mp3", data, "audio/mpeg")},
+            data={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": target, "convertAudio": "1"},
+            files={"file": ("hold_music.mp3", data, "audio/mpeg")},
             timeout=90,
         )
         response.raise_for_status()
