@@ -205,7 +205,7 @@ def redact(text):
         YEMOT_PASSWORD,
         MAIL_WEBHOOK_SECRET,
         BREVO_API_KEY,
-        GOOGLE_CLIENT_SECRET,
+        GOOGLE_CLIENT_SECRET if "GOOGLE_CLIENT_SECRET" in globals() else "",
         ADMIN_PASSWORD if "ADMIN_PASSWORD" in globals() else "",
         GEMINI_KEY_ENCRYPTION_KEY if "GEMINI_KEY_ENCRYPTION_KEY" in globals() else "",
         GEMINI_API_KEY,
