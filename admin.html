@@ -301,10 +301,10 @@
         h('label', { class: 'f' }, 'כתובת דוא״ל / תיבה', email),
         h('label', { class: 'check' }, emailEnabled, 'אפשר גישה למייל עבור המשתמש'),
         h('p', { class: 'sub' }, 'הערה: חיבור OAuth נפרד לתיבת Gmail של כל משתמש עדיין אינו מוגדר; כרגע נשמרים פרטי המשתמש והרשאת הגישה.'),
-        h('label', { class: 'check' }, chatEnabled, 'הפעלת אפשרות צ׳אט (הגדרה בלבד)'),
+        h('label', { class: 'check' }, chatEnabled, 'צ׳אט – הגדרה בלבד, ממתין לחיבור השירות'),
         h('label', { class: 'f' }, 'תפריט העוזר – סגנון למשתמש', mode),
         h('label', { class: 'check' }, toolsEnabled, 'הרשאה לכלי AI'),
-        h('label', { class: 'check' }, historyEnabled, 'הרשאה לצפייה בהיסטוריית שיחות'),
+        h('label', { class: 'check' }, historyEnabled, 'הרשאה להצגת היסטוריית שיחות באזור האישי (תופעל עם התחברות משתמשים)'),
         h('label', { class: 'check' }, enabled, 'המשתמש מורשה להשתמש במערכת'),
         h('div', { class: 'bar' },
           h('button', { onclick: function () {
