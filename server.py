@@ -450,6 +450,29 @@ def db_notify_key_pool_empty(phone):
         conn.close()
 
 
+def db_notify_runtime_error(phone, message):
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        clean_phone = re.sub(r"[^0-9]", "", str(phone or ""))[:30]
+        clean_message = redact(message or "שגיאת מערכת")[:500]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO admin_notifications(kind, phone, message)
+                       VALUES ('runtime_error', %s, %s)
+                       ON CONFLICT (kind, phone) WHERE resolved_at IS NULL DO UPDATE
+                       SET message = EXCLUDED.message, created_at = now()""",
+                    (clean_phone, clean_message))
+        return True
+    except Exception as e:
+        print("runtime error notification failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
+
+
 def db_list_notifications():
     conn = db_connect()
     if conn is None:
@@ -1337,6 +1360,7 @@ def worker(call_id, recorded, phone="", use_yiddish=None):
         change_voice = False
         failed = True
         err = redact(str(e))[:140]
+        db_notify_runtime_error(phone, err)
 
     audio_path = None
     if voice_on() and not failed:
@@ -1980,6 +2004,7 @@ def admin_caller_put():
             cur[field] = str(d.get(field) or "").strip()[:limit]
     if "email_enabled" in d:
         cur["email_enabled"] = bool(d["email_enabled"])
+        cur["mail"] = bool(d["email_enabled"])
     if "chat_enabled" in d:
         cur["chat_enabled"] = bool(d["chat_enabled"])
     if "assistant_mode" in d:
