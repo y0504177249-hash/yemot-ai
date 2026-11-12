@@ -279,6 +279,16 @@
       var email = h('input', { type: 'email', value: p.email_address || '', maxlength: 254, placeholder: 'name@example.com' });
       var emailEnabled = h('input', { type: 'checkbox', checked: !!p.email_enabled });
       var chatEnabled = h('input', { type: 'checkbox', checked: !!p.chat_enabled });
+      var mode = h('select', null,
+        [
+          ['smart', '1. רודי חכם'],
+          ['edgy', '2. רודי עוקצן ופוגעני'],
+          ['psychologist', '3. פסיכולוגית'],
+          ['yeshiva', '4. בסגנון ראש ישיבה'],
+          ['yiddish', '5. משפיע באידיש'],
+          ['tools', '6. כלי AI']
+        ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
+      );
       var enabled = h('input', { type: 'checkbox', checked: p.enabled !== false });
       var content = h('section', null,
         h('h2', null, 'תיק אישי'),
@@ -290,6 +300,7 @@
         h('label', { class: 'check' }, emailEnabled, 'אפשר גישה למייל עבור המשתמש'),
         h('p', { class: 'sub' }, 'הערה: חיבור OAuth נפרד לתיבת Gmail של כל משתמש עדיין אינו מוגדר; כרגע נשמרים פרטי המשתמש והרשאת הגישה.'),
         h('label', { class: 'check' }, chatEnabled, 'הפעלת אפשרות צ׳אט (הגדרה בלבד)'),
+        h('label', { class: 'f' }, 'סגנון העוזר למשתמש', mode),
         h('label', { class: 'check' }, enabled, 'המשתמש מורשה להשתמש במערכת'),
         h('div', { class: 'bar' },
           h('button', { onclick: function () {
@@ -297,7 +308,7 @@
               return api('PUT', 'caller', {
                 phone: phone, name: name.value, assigned_address: address.value,
                 email_address: email.value, email_enabled: emailEnabled.checked,
-                chat_enabled: chatEnabled.checked, enabled: enabled.checked
+                chat_enabled: chatEnabled.checked, assistant_mode: mode.value, enabled: enabled.checked
               });
             });
           } }, 'שמירת פרטי המשתמש'),
