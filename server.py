@@ -1711,6 +1711,7 @@ app.config.update(
 ADMIN_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
 _login_fails = collections.deque()
 _ip_fails = {}
+_personal_ip_fails = {}
 
 
 @app.after_request
@@ -1785,6 +1786,12 @@ def personal_login():
     pin = str(d.get("pin", ""))
     if not re.fullmatch(r"\d{5,15}", phone) or not re.fullmatch(r"\d{6,12}", pin):
         return jsonify({"error": "יש להזין מספר טלפון וקוד אישי תקינים"}), 400
+    ip = client_ip()
+    now = time.time()
+    attempts = [t for t in _personal_ip_fails.get(ip, []) if now - t < 600]
+    _personal_ip_fails[ip] = attempts
+    if len(attempts) >= 8:
+        return jsonify({"error": "יותר מדי ניסיונות כניסה. נסה שוב בעוד כמה דקות"}), 429
     conn = db_connect()
     if conn is None:
         return jsonify({"error": "המערכת אינה זמינה כרגע"}), 503
@@ -1794,7 +1801,9 @@ def personal_login():
             cur.execute("SELECT pin_hash, enabled FROM caller_profiles WHERE phone=%s", (phone,))
             row = cur.fetchone()
         if not row or not row[0] or not row[1] or not verify_personal_pin(pin, row[0]):
+            _personal_ip_fails[ip].append(now)
             return jsonify({"error": "מספר הטלפון או הקוד האישי שגויים"}), 401
+        _personal_ip_fails.pop(ip, None)
         session.clear()
         session["personal_phone"] = phone
         session.permanent = True
