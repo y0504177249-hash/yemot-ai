@@ -1843,6 +1843,7 @@ def personal_profile():
             if row[5]:
                 cur.execute("SELECT created_at, heard, answer FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 100", (phone,))
                 transcripts = [{"created_at": x[0].isoformat(), "heard": x[1] or "", "answer": x[2] or ""} for x in cur.fetchall()]
+        conn.commit()  # Persist additive profile migration.
         return jsonify({"profile": {"phone": row[0], "name": row[1] or "", "assigned_address": row[2] or "", "assistant_mode": row[3] or "smart", "tools_enabled": bool(row[4]), "history_enabled": bool(row[5])}, "transcripts": transcripts})
     finally:
         conn.close()
@@ -2137,6 +2138,7 @@ def admin_state():
                     })
                     _store["callers"][ph] = current
                     _caller_loaded.add(ph)
+            conn.commit()  # Persist additive profile migration.
         except Exception as e:
             print("admin profile directory load failed:", redact(e), flush=True)
         finally:
@@ -2361,6 +2363,7 @@ def admin_caller_detail(phone):
                    WHERE phone=%s AND resolved_at IS NULL
                    ORDER BY created_at DESC LIMIT 50""", (phone,))
             alerts = cur.fetchall()
+        conn.commit()  # Persist additive profile migration.
         return jsonify({
             "profile": {
                 "phone": phone, "name": profile.get("name", ""),
