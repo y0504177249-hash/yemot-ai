@@ -522,6 +522,7 @@ def db_ensure_profile_columns(conn):
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assistant_mode TEXT NOT NULL DEFAULT 'smart'")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS tools_enabled BOOLEAN NOT NULL DEFAULT TRUE")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS history_enabled BOOLEAN NOT NULL DEFAULT TRUE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS pin_hash TEXT NOT NULL DEFAULT ''")
 
 
 def db_save_caller(phone, profile):
@@ -1750,6 +1751,109 @@ def admin_required(f):
         return f(*a, **k)
 
     return wrapper
+
+
+def pin_hash_value(pin, salt=None):
+    salt = salt or os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 310000)
+    return base64.urlsafe_b64encode(salt).decode("ascii") + "$" + base64.urlsafe_b64encode(digest).decode("ascii")
+
+
+def verify_personal_pin(pin, stored):
+    try:
+        salt_b64, digest_b64 = stored.split("$", 1)
+        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+        expected = base64.urlsafe_b64decode(digest_b64.encode("ascii"))
+        actual = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 310000)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+@app.route("/personal")
+@app.route("/personal/")
+def personal_page():
+    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "personal.html"), mimetype="text/html")
+
+
+@app.route("/personal/login", methods=["POST"])
+def personal_login():
+    if request.headers.get("X-Requested-With") != "personal":
+        return jsonify({"error": "בקשה לא תקינה"}), 403
+    d = request.get_json(silent=True) or {}
+    phone = re.sub(r"[^0-9]", "", str(d.get("phone", "")))[:15]
+    pin = str(d.get("pin", ""))
+    if not re.fullmatch(r"\\d{5,15}", phone) or not re.fullmatch(r"\\d{6,12}", pin):
+        return jsonify({"error": "יש להזין מספר טלפון וקוד אישי תקינים"}), 400
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "המערכת אינה זמינה כרגע"}), 503
+    try:
+        with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
+            cur.execute("SELECT pin_hash, enabled FROM caller_profiles WHERE phone=%s", (phone,))
+            row = cur.fetchone()
+        if not row or not row[0] or not row[1] or not verify_personal_pin(pin, row[0]):
+            return jsonify({"error": "מספר הטלפון או הקוד האישי שגויים"}), 401
+        session.clear()
+        session["personal_phone"] = phone
+        session.permanent = True
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/personal/logout", methods=["POST"])
+def personal_logout():
+    session.pop("personal_phone", None)
+    return jsonify({"ok": True})
+
+
+@app.route("/personal/api/profile")
+def personal_profile():
+    phone = session.get("personal_phone")
+    if not phone:
+        return jsonify({"error": "נדרשת כניסה"}), 401
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "המערכת אינה זמינה כרגע"}), 503
+    try:
+        with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
+            cur.execute("SELECT phone, display_name, assigned_address, assistant_mode, tools_enabled, history_enabled FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
+            row = cur.fetchone()
+            if not row:
+                session.pop("personal_phone", None)
+                return jsonify({"error": "החשבון אינו פעיל"}), 403
+            transcripts = []
+            if row[5]:
+                cur.execute("SELECT created_at, heard, answer FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 100", (phone,))
+                transcripts = [{"created_at": x[0].isoformat(), "heard": x[1] or "", "answer": x[2] or ""} for x in cur.fetchall()]
+        return jsonify({"profile": {"phone": row[0], "name": row[1] or "", "assigned_address": row[2] or "", "assistant_mode": row[3] or "smart", "tools_enabled": bool(row[4]), "history_enabled": bool(row[5])}, "transcripts": transcripts})
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/caller/<phone>/pin", methods=["POST"])
+@admin_required
+def admin_set_personal_pin(phone):
+    phone = re.sub(r"[^0-9]", "", str(phone))[:15]
+    pin = str((request.get_json(silent=True) or {}).get("pin", ""))
+    if not re.fullmatch(r"\\d{6,12}", pin):
+        return jsonify({"error": "הקוד חייב להכיל 6 עד 12 ספרות"}), 400
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute("UPDATE caller_profiles SET pin_hash=%s, updated_at=now() WHERE phone=%s", (pin_hash_value(pin), phone))
+                if not cur.rowcount:
+                    return jsonify({"error": "המשתמש לא נמצא במסד הנתונים"}), 404
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 
 @app.route("/admin")
