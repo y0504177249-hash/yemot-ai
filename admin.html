@@ -290,6 +290,11 @@
         ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
       );
       var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
+      var personalPin = h('input', { type: 'password', inputmode: 'numeric', maxlength: 12, placeholder: '6–12 ספרות' });
+      var pinSave = h('button', { class: 'quiet', onclick: function () {
+        if (!/^\\d{6,12}$/.test(personalPin.value)) { say('הקוד חייב להכיל 6 עד 12 ספרות', true); return; }
+        api('POST', 'caller/' + encodeURIComponent(phone) + '/pin', { pin: personalPin.value }).then(function () { personalPin.value = ''; say('הקוד האישי נשמר בהצלחה'); }).catch(function (e) { say(e.message, true); });
+      } }, 'שמירת קוד אישי');
       var historyEnabled = h('input', { type: 'checkbox', checked: p.history_enabled !== false });
       var enabled = h('input', { type: 'checkbox', checked: p.enabled !== false });
       var content = h('section', null,
@@ -297,6 +302,8 @@
         h('p', { class: 'sub' }, 'מספר הטלפון הוא המזהה הייחודי של המשתמש. היסטוריית השיחות וההתראות משויכות אליו.'),
         h('div', { class: 'ident' }, h('strong', { class: 'phone num' }, phone)),
         h('label', { class: 'f' }, 'שם פרטי', name),
+        h('label', { class: 'f' }, 'קוד כניסה לאזור האישי (יוצג פעם אחת בלבד)', personalPin),
+        pinSave,
         h('label', { class: 'f' }, 'כתובת שהוקצתה למשתמש', address),
         h('label', { class: 'f' }, 'כתובת דוא״ל / תיבה', email),
         h('label', { class: 'check' }, emailEnabled, 'אפשר גישה למייל עבור המשתמש'),
