@@ -594,6 +594,7 @@ def db_load_caller(phone):
                 (phone,),
             )
             row = cur.fetchone()
+        conn.commit()  # Persist additive schema migration after successful read.
         if row:
             current = dict(_store["callers"].get(phone) or {})
             current["name"] = row[0] or current.get("name", "")
@@ -1805,6 +1806,7 @@ def personal_login():
             db_ensure_profile_columns(conn)
             cur.execute("SELECT pin_hash, enabled FROM caller_profiles WHERE phone=%s", (phone,))
             row = cur.fetchone()
+        conn.commit()  # Persist the additive profile migration.
         if not row or not row[0] or not row[1] or not verify_personal_pin(pin, row[0]):
             _personal_ip_fails[ip].append(now)
             return jsonify({"error": "מספר הטלפון או הקוד האישי שגויים"}), 401
