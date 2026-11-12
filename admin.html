@@ -292,7 +292,7 @@
       var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
       var personalPin = h('input', { type: 'password', inputmode: 'numeric', maxlength: 12, placeholder: '6–12 ספרות' });
       var pinSave = h('button', { class: 'quiet', onclick: function () {
-        if (!/^\\d{6,12}$/.test(personalPin.value)) { say('הקוד חייב להכיל 6 עד 12 ספרות', true); return; }
+        if (!/^\d{6,12}$/.test(personalPin.value)) { say('הקוד חייב להכיל 6 עד 12 ספרות', true); return; }
         api('POST', 'caller/' + encodeURIComponent(phone) + '/pin', { pin: personalPin.value }).then(function () { personalPin.value = ''; say('הקוד האישי נשמר בהצלחה'); }).catch(function (e) { say(e.message, true); });
       } }, 'שמירת קוד אישי');
       var historyEnabled = h('input', { type: 'checkbox', checked: p.history_enabled !== false });
