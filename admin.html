@@ -289,9 +289,11 @@
           ['tools', '6. כלי AI']
         ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
       );
+      var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
+      var historyEnabled = h('input', { type: 'checkbox', checked: p.history_enabled !== false });
       var enabled = h('input', { type: 'checkbox', checked: p.enabled !== false });
       var content = h('section', null,
-        h('h2', null, 'תיק אישי'),
+        h('h2', null, '7. אזור אישי'),
         h('p', { class: 'sub' }, 'מספר הטלפון הוא המזהה הייחודי של המשתמש. היסטוריית השיחות וההתראות משויכות אליו.'),
         h('div', { class: 'ident' }, h('strong', { class: 'phone num' }, phone)),
         h('label', { class: 'f' }, 'שם פרטי', name),
@@ -300,7 +302,9 @@
         h('label', { class: 'check' }, emailEnabled, 'אפשר גישה למייל עבור המשתמש'),
         h('p', { class: 'sub' }, 'הערה: חיבור OAuth נפרד לתיבת Gmail של כל משתמש עדיין אינו מוגדר; כרגע נשמרים פרטי המשתמש והרשאת הגישה.'),
         h('label', { class: 'check' }, chatEnabled, 'הפעלת אפשרות צ׳אט (הגדרה בלבד)'),
-        h('label', { class: 'f' }, 'סגנון העוזר למשתמש', mode),
+        h('label', { class: 'f' }, 'תפריט העוזר – סגנון למשתמש', mode),
+        h('label', { class: 'check' }, toolsEnabled, 'הרשאה לכלי AI'),
+        h('label', { class: 'check' }, historyEnabled, 'הרשאה לצפייה בהיסטוריית שיחות'),
         h('label', { class: 'check' }, enabled, 'המשתמש מורשה להשתמש במערכת'),
         h('div', { class: 'bar' },
           h('button', { onclick: function () {
@@ -308,7 +312,7 @@
               return api('PUT', 'caller', {
                 phone: phone, name: name.value, assigned_address: address.value,
                 email_address: email.value, email_enabled: emailEnabled.checked,
-                chat_enabled: chatEnabled.checked, assistant_mode: mode.value, enabled: enabled.checked
+                chat_enabled: chatEnabled.checked, assistant_mode: mode.value, tools_enabled: toolsEnabled.checked, history_enabled: historyEnabled.checked, enabled: enabled.checked
               });
             });
           } }, 'שמירת פרטי המשתמש'),
