@@ -713,7 +713,7 @@ def admin_menu_text(message=""):
     return (prefix + f"תפריט ניהול. מצב העוזר: {enabled}. קול: {voice}. "
             "לבדיקת מצב הקש 1. להפעלה או כיבוי של העוזר הקש 2. למענה קולי הקש 3. "
             "להחלפת קול הקש 4. ליציאה לשיחה רגילה הקש 5. לתמלולי שיחות אחרונות הקש 6. "
-            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8.")
+            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8. ליציאה מהירה הקש סולמית או 0.")
 
 
 def admin_status_text():
@@ -1482,7 +1482,9 @@ def ivr():
                     mimetype="text/plain",
                 )
             if stage == "code":
-                if keypad:
+                if keypad in ("", "#"):
+                    st["admin_stage"] = "chat"
+                elif keypad:
                     if hmac.compare_digest(keypad, PHONE_ADMIN_CODE):
                         st["admin_stage"] = "menu"
                         return Response(admin_digits_command(admin_menu_text("הקוד אושר"), "admin_action", 1, 1), mimetype="text/plain")
@@ -1491,6 +1493,12 @@ def ivr():
                 # No digits means the caller pressed # to continue to the regular AI assistant.
                 st["admin_stage"] = "chat"
             elif stage == "menu":
+                if keypad in ("#", "0"):
+                    st["admin_stage"] = "chat"
+                    return Response(read_command("יצאת מתפריט הניהול. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
+                if not keypad:
+                    st["admin_stage"] = "chat"
+                    return Response(read_command("לא התקבלה בחירה. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
                 if keypad == "1":
                     message = admin_status_text()
                 elif keypad == "2":
