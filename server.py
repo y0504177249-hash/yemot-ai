@@ -76,17 +76,22 @@ WEBHOOK_ENABLED = bool(MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET)
 EMAIL_ENABLED = bool(WEBHOOK_ENABLED or (BREVO_API_KEY and MAIL_FROM))
 
 def build_email_prompt(contacts):
-    return (
-        " יש לך גישה לתיבת המייל של המשתמש. בפורמט ה-JSON אפשר להוסיף את השדות send_email, mail, confirm_pending (ברירת מחדל null). "
+    common = (
+        " בפורמט ה-JSON אפשר להוסיף את השדות send_email, confirm_pending (ברירת מחדל null). "
         "כשמגדירים אחד מהם השאר answer ריק. "
-        "לשליחת מייל הגדר send_email={\"to\": \"שם איש קשר או שם אדם או כתובת מייל מלאה באותיות לועזיות\", \"subject\": \"נושא\", \"body\": \"תוכן\"}. "
+        "לשליחת מייל הגדר send_email={\\"to\\": \\"שם איש קשר או שם אדם או כתובת מייל מלאה באותיות לועזיות\\", \\"subject\\": \\"נושא\\", \\"body\\": \\"תוכן\\"}. "
         "אל תשאל אישור בעצמך: השרת בודק את הכתובת, מקריא אותה ושואל את המשתמש. "
         "אנשי קשר ידועים: " + (", ".join(contacts.keys()) or "אין") + ". "
         "כשהמשתמש אומר כתובת מייל בקול, כתוב אותה בצורה תקנית (שטרודל הוא @ ונקודה היא .). "
-        "אם יש הערת מערכת שמייל ממתין לאישור: כן או אישור = confirm_pending=\"yes\", לא או ביטול = confirm_pending=\"no\", ובקשת שינוי = send_email חדש. "
-        "לקריאת מיילים הגדר mail={\"action\": \"search\", \"query\": \"שאילתת ג'ימייל\"}, למשל is:unread או from:דני או newer_than:1d או subject:חשבונית או in:inbox. "
-        "אחר כך אפשר לקרוא מייל מהרשימה האחרונה לפי מספר: mail={\"action\": \"read\", \"index\": 1, \"full\": false}. full=true רק אם ביקש להקריא את כל המייל."
+        "אם יש הערת מערכת שמייל ממתין לאישור: כן או אישור = confirm_pending=\\"yes\\", לא או ביטול = confirm_pending=\\"no\\", ובקשת שינוי = send_email חדש. "
     )
+    if WEBHOOK_ENABLED:
+        return (
+            " יש חיבור לתיבת המייל דרך שירות הדואר המחובר. " + common +
+            "לקריאת מיילים הגדר mail={\\"action\\": \\"search\\", \\"query\\": \\"שאילתת ג'ימייל\\"}, למשל is:unread או from:דני או newer_than:1d או subject:חשבונית או in:inbox. "
+            "אחר כך אפשר לקרוא מייל מהרשימה האחרונה לפי מספר: mail={\\"action\\": \\"read\\", \\"index\\": 1, \\"full\\": false}. full=true רק אם ביקש להקריא את כל המייל."
+        )
+    return " יש אפשרות לשלוח מיילים דרך שירות שליחה מחובר, אך אין גישה לקריאת תיבת הדואר. " + common
 
 
 # ---- קול טבעי (Gemini TTS) ----
