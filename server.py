@@ -161,6 +161,7 @@ def settings_defaults():
         "mail_mode": "all" if ALLOW_ALL_PHONES else ("listed" if ALLOWED_PHONES else "off"),
         "mail_contacts": MAIL_CONTACTS,
         "extra_instructions": "",
+        "assistant_mode": "smart",
     }
 
 
@@ -231,9 +232,19 @@ _prompt_cache = {}
 def system_prompt():
     contacts = cfg("mail_contacts")
     extra = (cfg("extra_instructions") or "").strip()
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode())
+    selected_mode = caller(getattr(_tls, "phone", "")).get("assistant_mode") or cfg("assistant_mode") or "smart"
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode)
     if key not in _prompt_cache:
+        mode_prompts = {
+            "smart": "סגנון רודי חכם: היה חד, מועיל, סקרן, מדויק וענייני. הסבר בפשטות והתאם את התשובה למשתמש.",
+            "edgy": "סגנון רודי עוקצן: השתמש בהומור חד, עקיצות קלילות ושנינות, אך אל תשפיל, תאיים או תפגע בקבוצות או באנשים באופן אכזרי.",
+            "psychologist": "סגנון פסיכולוגית: הקשיבי באמפתיה, שאלי שאלות פתוחות, שיקפי רגשות והציעי צעד קטן. אינך פסיכולוגית מוסמכת, אל תאבחני ואל תחליפי טיפול מקצועי.",
+            "yeshiva": "סגנון ראש ישיבה: דבר בחכמה, בנחת ובבהירות, עם משל קצר ומסר מעשי כשמתאים. אל תמציא ציטוטים או מקורות.",
+            "yiddish": "סגנון משפיע באידיש: ענה ביידיש טבעית, חמה וישיבתית בלבד, בלי אנגלית ובלי לעז.",
+            "tools": "סגנון כלי AI: התמקד בביצוע משימות, חיפוש מידע, סיכום, ניסוח, חישוב והפעלת כלים זמינים. ציין כשאין לך אפשרות לבצע פעולה בפועל."
+        }
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT) + LOOKUP_PROMPT
+        text += " " + mode_prompts.get(selected_mode, mode_prompts["smart"])
         if voice_on():
             text += VOICE_PROMPT
         if EMAIL_ENABLED:
@@ -481,6 +492,7 @@ def db_ensure_profile_columns(conn):
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_address TEXT NOT NULL DEFAULT ''")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NOT NULL DEFAULT FALSE")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS chat_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assistant_mode TEXT NOT NULL DEFAULT 'smart'")
 
 
 def db_save_caller(phone, profile):
@@ -493,8 +505,8 @@ def db_save_caller(phone, profile):
                 db_ensure_profile_columns(conn)
                 cur.execute(
                     """INSERT INTO caller_profiles
-                       (phone, display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                       (phone, display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
                        ON CONFLICT (phone) DO UPDATE SET
                          display_name = EXCLUDED.display_name,
                          enabled = EXCLUDED.enabled,
@@ -502,10 +514,12 @@ def db_save_caller(phone, profile):
                          email_address = EXCLUDED.email_address,
                          email_enabled = EXCLUDED.email_enabled,
                          chat_enabled = EXCLUDED.chat_enabled,
+                         assistant_mode = EXCLUDED.assistant_mode,
                          updated_at = now()""",
                     (phone, profile.get("name", ""), profile.get("enabled", True),
                      profile.get("assigned_address", ""), profile.get("email_address", ""),
-                     bool(profile.get("email_enabled")), bool(profile.get("chat_enabled"))),
+                     bool(profile.get("email_enabled")), bool(profile.get("chat_enabled")),
+                     profile.get("assistant_mode", "smart")),
                 )
         return True
     except Exception as e:
@@ -542,7 +556,7 @@ def db_load_caller(phone):
         with conn.cursor() as cur:
             db_ensure_profile_columns(conn)
             cur.execute(
-                """SELECT display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled
+                """SELECT display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode
                    FROM caller_profiles WHERE phone = %s""",
                 (phone,),
             )
@@ -555,6 +569,7 @@ def db_load_caller(phone):
             current["email_address"] = row[3] or ""
             current["email_enabled"] = bool(row[4])
             current["chat_enabled"] = bool(row[5])
+            current["assistant_mode"] = row[6] or "smart"
             _store["callers"][phone] = current
         else:
             # Migrate an existing locally/webhook-stored caller profile on first contact.
@@ -1303,6 +1318,7 @@ def worker(call_id, recorded, phone="", use_yiddish=None):
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in keys else "default"
     _tls.kind = "chat"
+    _tls.phone = phone
     _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
     _tls.record_path = "/1/1" if _tls.yiddish else "/8"
     _tls.extension_path = "/1/1" if _tls.yiddish else "/8"
@@ -1911,6 +1927,7 @@ def admin_state():
             "email_address": c.get("email_address", ""),
             "email_enabled": bool(c.get("email_enabled")),
             "chat_enabled": bool(c.get("chat_enabled")),
+            "assistant_mode": c.get("assistant_mode", "smart"),
             "state": quota_state(ph if key else "default"),
         })
     try:
@@ -1965,6 +1982,12 @@ def admin_caller_put():
         cur["email_enabled"] = bool(d["email_enabled"])
     if "chat_enabled" in d:
         cur["chat_enabled"] = bool(d["chat_enabled"])
+    if "assistant_mode" in d:
+        allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools"}
+        mode = str(d.get("assistant_mode") or "smart")
+        if mode not in allowed_modes:
+            return jsonify({"error": "סגנון העוזר אינו תקין"}), 400
+        cur["assistant_mode"] = mode
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
@@ -2110,6 +2133,7 @@ def admin_caller_detail(phone):
                 "email_address": profile.get("email_address", ""),
                 "email_enabled": bool(profile.get("email_enabled")),
                 "chat_enabled": bool(profile.get("chat_enabled")),
+                "assistant_mode": profile.get("assistant_mode", "smart"),
                 "enabled": bool(profile.get("enabled", True))
             },
             "transcripts": [
