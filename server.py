@@ -239,7 +239,29 @@ def system_prompt():
             "psychologist": "סגנון פסיכולוגית: הקשיבי באמפתיה, שאלי שאלות פתוחות, שיקפי רגשות והציעי צעד קטן. אינך פסיכולוגית מוסמכת, אל תאבחני ואל תחליפי טיפול מקצועי.",
             "yeshiva": ("זיי א קלוגער ראש ישיבה: רעד מיט חכמה, רואיגקייט און דרך ארץ. דערקלער א זאך מיט א קורצן משל אדער א פשוטער מעשה ווען עס העלפט, און געב א קליינעם מעשיות'דיגן שריט. מאך נישט קיין פאבריצירטע ציטאטן אדער מקורות." if yiddish_mode() else "סגנון ראש ישיבה: דבר בחכמה, בנחת ובבהירות, עם משל קצר ומסר מעשי כשמתאים. אל תמציא ציטוטים או מקורות."),
             "yiddish": "סגנון משפיע באידיש: ענה ביידיש טבעית, חמה וישיבתית בלבד, בלי אנגלית ובלי לעז.",
-            "tools": "סגנון כלי AI: התמקד בביצוע משימות, חיפוש מידע, סיכום, ניסוח, חישוב והפעלת כלים זמינים. ציין כשאין לך אפשרות לבצע פעולה בפועל."
+            "tools": (
+                "אתה מרכז כלי AI קולי. בתחילת שיחה הצג תפריט קצר והצע למשתמש לבחור: "
+                "מיילים (הקראת הודעות, חיפוש, סיכום, ניסוח ושליחה בכפוף לחיבור ולהרשאה), "
+                "צ'אט חופשי עם AI, כתיבה וניסוח, תרגום, סיכום מסמכים, חיפוש מידע, "
+                "לימוד והסברים, תכנון משימות וחישובים. "
+                "אם המשתמש בוחר מיילים, ברר אם הוא רוצה לקרוא/לחפש הודעה או לנסח/לשלוח. "
+                "לעולם אל תטען שקראת תיבה או שלחת הודעה אם פעולת השרת לא אישרה זאת. "
+                "לפני שליחת מייל יש להשתמש בתהליך האישור המובנה בלבד. "
+                "אם אין חיבור לתיבה, אמור זאת והצע ניסוח מייל שהמשתמש יוכל להעתיק. "
+                "בצ'אט חופשי נהל שיחה טבעית, זכור את ההקשר בשיחה הנוכחית וענה בקצרה."
+            ),
+            "astrology": (
+                "אתה אסטרולוג ומפרש מפת אישיות בסגנון חם, מעמיק, רגיש ומכבד. "
+                "בתחילת השיחה בקש שם פרטי ותאריך לידה מלא: יום, חודש ושנה. "
+                "אם חסר פרט, שאל רק על הפרט החסר, אחד בכל פעם. אל תבקש מספר זהות או פרטים מזהים נוספים. "
+                "לאחר קבלת הפרטים, צור קריאה ארוכה ומעמיקה הכוללת מזל שמש לפי התאריך, "
+                "נטיות אופי, חוזקות, נקודות רגישות, דפוסי חשיבה ותקשורת, קשרים וזוגיות, "
+                "עבודה וכישרונות, מניעים פנימיים, אתגרים, צמיחה אישית והמלצות להתבוננות. "
+                "שלב את השם הפרטי בטון אישי אך אל תטען שהשם או תאריך הלידה מוכיחים עובדות על האדם. "
+                "הבהר בעדינות שזו פרשנות אסטרולוגית/רוחנית לצורכי עניין והתבוננות, לא אבחון מדעי או תחזית ודאית. "
+                "אל תמציא מיקום כוכבים, ירח, אופק או בתים אסטרולוגיים; ללא שעת ועיר לידה אין לחשב אותם. "
+                "אל תציג ייעוץ רפואי, משפטי או כלכלי כנגזר מהמפה."
+            )
         }
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
         if tools_allowed:
@@ -352,7 +374,8 @@ if os.environ.get("CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS") == "1":
         ("ivr2:3", "he", "psychologist", "פסיכולוגית"),
         ("ivr2:4", "yi", "yeshiva", "ראש ישיבה"),
         ("ivr2:5", "yi", "yiddish", "משפיע באידיש"),
-        ("ivr2:6", "he", "tools", "כלי AI"),
+        ("ivr2:6", "he", "tools", "מרכז כלי AI"),
+        ("ivr2:7", "he", "astrology", "אסטרולוגיה ומפת אישיות"),
         # Keep existing entry points working with the requested reassignment.
         ("ivr2:1/1", "yi", "yeshiva", "ראש ישיבה"),
         ("ivr2:8", "he", "smart", "רודי חכם"),
@@ -1438,7 +1461,7 @@ def ivr():
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
-    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools"}
+    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}
     assistant_mode = requested_mode if requested_mode in allowed_modes else ("yiddish" if requested_lang in ("yi", "yiddish", "1") else "smart")
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
@@ -1502,6 +1525,17 @@ def ivr():
                 greeting = "שלום, בפעם הקודמת שאלת על " + topic_for_greeting + context + ". נרצה להמשיך מאותה נקודה, או שיש משהו חדש שתרצה לדבר עליו?"
             else:
                 greeting = "שלום, אני כאן להקשיב ולעזור. על מה תרצה לדבר היום?"
+        if assistant_mode == "tools":
+            greeting = (
+                "ברוכים הבאים למרכז כלי הבינה המלאכותית. "
+                "אפשר לבקש מיילים, צ'אט חופשי, כתיבה, תרגום, סיכום, חיפוש מידע, לימוד או תכנון משימות. "
+                "מה תרצה לעשות?"
+            )
+        elif assistant_mode == "astrology":
+            greeting = (
+                "ברוכים הבאים למפת האישיות האסטרולוגית שלך. "
+                "כדי להתחיל, אמור את שמך הפרטי ואת יום, חודש ושנת הלידה שלך."
+            )
         st.setdefault("opening_greeting", greeting)
         st["t"] = time.time()
 
@@ -1637,7 +1671,7 @@ def ivr():
                 return Response(wait_command(), mimetype="text/plain")
             if recorded and not st.get("name_status"):
                 st["name_status"] = "processing"
-                threading.Thread(target=worker_name, args=(call_id, recorded, phone, use_yiddish, assistant_mode), daemon=True).start()
+                threading.Thread(target=worker_name, args=(call_id, recorded, phone, use_yiddish), daemon=True).start()
                 return Response(wait_command(), mimetype="text/plain")
             if st.get("name_status") == "done" and not st.get("name_question_prompted"):
                 st["name_question_prompted"] = True
@@ -1649,7 +1683,7 @@ def ivr():
             st["last"] = recorded
             st["status"] = "processing"
             st["started"] = time.time()
-            threading.Thread(target=worker, args=(call_id, recorded, phone, use_yiddish), daemon=True).start()
+            threading.Thread(target=worker, args=(call_id, recorded, phone, use_yiddish, assistant_mode), daemon=True).start()
             return Response(wait_command(), mimetype="text/plain")
 
         # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-70 שניות
