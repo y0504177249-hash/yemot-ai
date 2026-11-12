@@ -1848,6 +1848,35 @@ def personal_profile():
         conn.close()
 
 
+@app.route("/personal/api/pin", methods=["POST"])
+def personal_change_pin():
+    phone = session.get("personal_phone")
+    if not phone:
+        return jsonify({"error": "נדרשת כניסה"}), 401
+    if request.headers.get("X-Requested-With") != "personal":
+        return jsonify({"error": "בקשה לא תקינה"}), 403
+    d = request.get_json(silent=True) or {}
+    old_pin = str(d.get("old_pin", ""))
+    new_pin = str(d.get("new_pin", ""))
+    if not re.fullmatch(r"\d{6,12}", new_pin):
+        return jsonify({"error": "הקוד החדש חייב להכיל 6 עד 12 ספרות"}), 400
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute("SELECT pin_hash FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
+                row = cur.fetchone()
+                if not row or not row[0] or not verify_personal_pin(old_pin, row[0]):
+                    return jsonify({"error": "הקוד הנוכחי שגוי"}), 401
+                cur.execute("UPDATE caller_profiles SET pin_hash=%s, updated_at=now() WHERE phone=%s", (pin_hash_value(new_pin), phone))
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
 @app.route("/admin/api/caller/<phone>/pin", methods=["POST"])
 @admin_required
 def admin_set_personal_pin(phone):
