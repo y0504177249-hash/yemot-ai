@@ -31,3 +31,16 @@ jobs:
           Path("/tmp/admin.js").write_text("\n".join(scripts), encoding="utf-8")
           PY
           node --check /tmp/admin.js
+
+      - name: Check personal-area JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path("personal.html").read_text(encoding="utf-8")
+          scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+          if not scripts:
+              raise SystemExit("No inline personal-area script found")
+          Path("/tmp/personal.js").write_text("\\n".join(scripts), encoding="utf-8")
+          PY
+          node --check /tmp/personal.js
