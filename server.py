@@ -1594,7 +1594,7 @@ def ivr():
             if not st.get("name_prompted"):
                 st["name_prompted"] = True
                 prompt = ("כדי איך זאל דיך קענען דערקענען ווייטער, זאג ביטע דיין נאמען." if use_yiddish
-                          else "כדי שאוכל לזהות אותך בשיחות הבאות, אמור בבקשה את שמך המלא.")
+                          else "כדי שאוכל לזהות אותך בשיחות הבאות, אמור בבקשה את שמך הפרטי.")
                 name_file = "n" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
                 return Response(
                     f"read=t-{clean_for_tts(prompt)}=question,no,record,{active_record_path()},{name_file},no,yes,no",
