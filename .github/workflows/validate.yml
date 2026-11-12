@@ -41,6 +41,6 @@ jobs:
           scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
           if not scripts:
               raise SystemExit("No inline personal-area script found")
-          Path("/tmp/personal.js").write_text("\\n".join(scripts), encoding="utf-8")
+          Path("/tmp/personal.js").write_text("\n".join(scripts), encoding="utf-8")
           PY
           node --check /tmp/personal.js
