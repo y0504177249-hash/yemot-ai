@@ -1716,6 +1716,11 @@ _personal_ip_fails = {}
 
 @app.after_request
 def admin_headers(resp):
+    if request.path.startswith("/personal"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
     if request.path.startswith("/admin"):
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["X-Frame-Options"] = "DENY"
