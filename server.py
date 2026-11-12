@@ -1945,6 +1945,34 @@ def admin_yiddish_chat():
 @admin_required
 def admin_state():
     maybe_refresh()
+    # Populate the admin directory from the persistent database, not only the current process cache.
+    conn = db_connect()
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute(
+                    """SELECT phone, display_name, enabled, assigned_address, email_address,
+                              email_enabled, chat_enabled, assistant_mode
+                       FROM caller_profiles ORDER BY phone""")
+                for row in cur.fetchall():
+                    ph = str(row[0] or "")
+                    current = dict(_store["callers"].get(ph) or {})
+                    current.update({
+                        "name": row[1] or current.get("name", ""),
+                        "enabled": bool(row[2]),
+                        "assigned_address": row[3] or "",
+                        "email_address": row[4] or "",
+                        "email_enabled": bool(row[5]),
+                        "chat_enabled": bool(row[6]),
+                        "assistant_mode": row[7] or "smart"
+                    })
+                    _store["callers"][ph] = current
+                    _caller_loaded.add(ph)
+        except Exception as e:
+            print("admin profile directory load failed:", redact(e), flush=True)
+        finally:
+            conn.close()
     now = time.time()
     env_keys = dict(GEMINI_KEYS)
     rows = []
