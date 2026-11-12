@@ -516,6 +516,8 @@ def db_ensure_profile_columns(conn):
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NOT NULL DEFAULT FALSE")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS chat_enabled BOOLEAN NOT NULL DEFAULT FALSE")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assistant_mode TEXT NOT NULL DEFAULT 'smart'")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS tools_enabled BOOLEAN NOT NULL DEFAULT TRUE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS history_enabled BOOLEAN NOT NULL DEFAULT TRUE")
 
 
 def db_save_caller(phone, profile):
@@ -528,8 +530,8 @@ def db_save_caller(phone, profile):
                 db_ensure_profile_columns(conn)
                 cur.execute(
                     """INSERT INTO caller_profiles
-                       (phone, display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                       (phone, display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode, tools_enabled, history_enabled, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                        ON CONFLICT (phone) DO UPDATE SET
                          display_name = EXCLUDED.display_name,
                          enabled = EXCLUDED.enabled,
@@ -538,11 +540,14 @@ def db_save_caller(phone, profile):
                          email_enabled = EXCLUDED.email_enabled,
                          chat_enabled = EXCLUDED.chat_enabled,
                          assistant_mode = EXCLUDED.assistant_mode,
+                         tools_enabled = EXCLUDED.tools_enabled,
+                         history_enabled = EXCLUDED.history_enabled,
                          updated_at = now()""",
                     (phone, profile.get("name", ""), profile.get("enabled", True),
                      profile.get("assigned_address", ""), profile.get("email_address", ""),
                      bool(profile.get("email_enabled")), bool(profile.get("chat_enabled")),
-                     profile.get("assistant_mode", "smart")),
+                     profile.get("assistant_mode", "smart"), bool(profile.get("tools_enabled", True)),
+                     bool(profile.get("history_enabled", True))),
                 )
         return True
     except Exception as e:
@@ -579,7 +584,7 @@ def db_load_caller(phone):
         with conn.cursor() as cur:
             db_ensure_profile_columns(conn)
             cur.execute(
-                """SELECT display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode
+                """SELECT display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode, tools_enabled, history_enabled
                    FROM caller_profiles WHERE phone = %s""",
                 (phone,),
             )
@@ -593,6 +598,8 @@ def db_load_caller(phone):
             current["email_enabled"] = bool(row[4])
             current["chat_enabled"] = bool(row[5])
             current["assistant_mode"] = row[6] or "smart"
+            current["tools_enabled"] = bool(row[7])
+            current["history_enabled"] = bool(row[8])
             _store["callers"][phone] = current
         else:
             # Migrate an existing locally/webhook-stored caller profile on first contact.
@@ -1953,7 +1960,7 @@ def admin_state():
                 db_ensure_profile_columns(conn)
                 cur.execute(
                     """SELECT phone, display_name, enabled, assigned_address, email_address,
-                              email_enabled, chat_enabled, assistant_mode
+                              email_enabled, chat_enabled, assistant_mode, tools_enabled, history_enabled
                        FROM caller_profiles ORDER BY phone""")
                 for row in cur.fetchall():
                     ph = str(row[0] or "")
@@ -1965,7 +1972,9 @@ def admin_state():
                         "email_address": row[4] or "",
                         "email_enabled": bool(row[5]),
                         "chat_enabled": bool(row[6]),
-                        "assistant_mode": row[7] or "smart"
+                        "assistant_mode": row[7] or "smart",
+                        "tools_enabled": bool(row[8]),
+                        "history_enabled": bool(row[9])
                     })
                     _store["callers"][ph] = current
                     _caller_loaded.add(ph)
@@ -1988,6 +1997,8 @@ def admin_state():
             "email_enabled": bool(c.get("email_enabled")),
             "chat_enabled": bool(c.get("chat_enabled")),
             "assistant_mode": c.get("assistant_mode", "smart"),
+            "tools_enabled": bool(c.get("tools_enabled", True)),
+            "history_enabled": bool(c.get("history_enabled", True)),
             "state": quota_state(ph if key else "default"),
         })
     try:
@@ -2049,6 +2060,10 @@ def admin_caller_put():
         if mode not in allowed_modes:
             return jsonify({"error": "סגנון העוזר אינו תקין"}), 400
         cur["assistant_mode"] = mode
+    if "tools_enabled" in d:
+        cur["tools_enabled"] = bool(d["tools_enabled"])
+    if "history_enabled" in d:
+        cur["history_enabled"] = bool(d["history_enabled"])
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
@@ -2195,6 +2210,8 @@ def admin_caller_detail(phone):
                 "email_enabled": bool(profile.get("email_enabled")),
                 "chat_enabled": bool(profile.get("chat_enabled")),
                 "assistant_mode": profile.get("assistant_mode", "smart"),
+                "tools_enabled": bool(profile.get("tools_enabled", True)),
+                "history_enabled": bool(profile.get("history_enabled", True)),
                 "enabled": bool(profile.get("enabled", True))
             },
             "transcripts": [
