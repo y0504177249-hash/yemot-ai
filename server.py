@@ -474,6 +474,15 @@ def db_resolve_notification(notification_id):
         conn.close()
 
 
+def db_ensure_profile_columns(conn):
+    """Additive profile migration; safe to run against existing installations."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assigned_address TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_address TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS chat_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+
+
 def db_save_caller(phone, profile):
     conn = db_connect()
     if conn is None:
@@ -481,14 +490,22 @@ def db_save_caller(phone, profile):
     try:
         with conn:
             with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
                 cur.execute(
-                    """INSERT INTO caller_profiles (phone, display_name, enabled, updated_at)
-                       VALUES (%s, %s, %s, now())
+                    """INSERT INTO caller_profiles
+                       (phone, display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, now())
                        ON CONFLICT (phone) DO UPDATE SET
                          display_name = EXCLUDED.display_name,
                          enabled = EXCLUDED.enabled,
+                         assigned_address = EXCLUDED.assigned_address,
+                         email_address = EXCLUDED.email_address,
+                         email_enabled = EXCLUDED.email_enabled,
+                         chat_enabled = EXCLUDED.chat_enabled,
                          updated_at = now()""",
-                    (phone, profile.get("name", ""), profile.get("enabled", True)),
+                    (phone, profile.get("name", ""), profile.get("enabled", True),
+                     profile.get("assigned_address", ""), profile.get("email_address", ""),
+                     bool(profile.get("email_enabled")), bool(profile.get("chat_enabled"))),
                 )
         return True
     except Exception as e:
@@ -523,8 +540,10 @@ def db_load_caller(phone):
         return
     try:
         with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
             cur.execute(
-                "SELECT display_name, enabled FROM caller_profiles WHERE phone = %s",
+                """SELECT display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled
+                   FROM caller_profiles WHERE phone = %s""",
                 (phone,),
             )
             row = cur.fetchone()
@@ -532,6 +551,10 @@ def db_load_caller(phone):
             current = dict(_store["callers"].get(phone) or {})
             current["name"] = row[0] or current.get("name", "")
             current["enabled"] = bool(row[1])
+            current["assigned_address"] = row[2] or ""
+            current["email_address"] = row[3] or ""
+            current["email_enabled"] = bool(row[4])
+            current["chat_enabled"] = bool(row[5])
             _store["callers"][phone] = current
         else:
             # Migrate an existing locally/webhook-stored caller profile on first contact.
@@ -1884,6 +1907,10 @@ def admin_state():
             "phone": ph, "name": c.get("name", ""), "mask": key_mask(key),
             "has_key": bool(c.get("key")), "from_env": bool(env_keys.get(ph)) and not c.get("key"),
             "mail": bool(c.get("mail")), "enabled": c.get("enabled", True),
+            "assigned_address": c.get("assigned_address", ""),
+            "email_address": c.get("email_address", ""),
+            "email_enabled": bool(c.get("email_enabled")),
+            "chat_enabled": bool(c.get("chat_enabled")),
             "state": quota_state(ph if key else "default"),
         })
     try:
@@ -1931,6 +1958,13 @@ def admin_caller_put():
         cur.pop("key", None)
     if "mail" in d:
         cur["mail"] = bool(d["mail"])
+    for field, limit in (("assigned_address", 300), ("email_address", 254)):
+        if field in d:
+            cur[field] = str(d.get(field) or "").strip()[:limit]
+    if "email_enabled" in d:
+        cur["email_enabled"] = bool(d["email_enabled"])
+    if "chat_enabled" in d:
+        cur["chat_enabled"] = bool(d["chat_enabled"])
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
@@ -2041,6 +2075,56 @@ def admin_transcripts():
     except Exception as e:
         print("transcript search failed:", redact(e), flush=True)
         return jsonify({"error": "לא ניתן לחפש בארכיון כרגע"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/caller/<phone>", methods=["GET"])
+@admin_required
+def admin_caller_detail(phone):
+    phone = re.sub(r"[^0-9]", "", str(phone))[:15]
+    if not phone:
+        return jsonify({"error": "מספר טלפון לא תקין"}), 400
+    db_load_caller(phone)
+    profile = dict(caller(phone))
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
+            cur.execute(
+                """SELECT id, call_id, caller_name, created_at, heard, answer
+                   FROM call_transcripts WHERE phone=%s
+                   ORDER BY created_at DESC, id DESC LIMIT 200""", (phone,))
+            transcripts = cur.fetchall()
+            cur.execute(
+                """SELECT id, kind, message, created_at FROM admin_notifications
+                   WHERE phone=%s AND resolved_at IS NULL
+                   ORDER BY created_at DESC LIMIT 50""", (phone,))
+            alerts = cur.fetchall()
+        return jsonify({
+            "profile": {
+                "phone": phone, "name": profile.get("name", ""),
+                "assigned_address": profile.get("assigned_address", ""),
+                "email_address": profile.get("email_address", ""),
+                "email_enabled": bool(profile.get("email_enabled")),
+                "chat_enabled": bool(profile.get("chat_enabled")),
+                "enabled": bool(profile.get("enabled", True))
+            },
+            "transcripts": [
+                {"id": r[0], "call_id": r[1], "name": r[2] or "",
+                 "created_at": r[3].isoformat(), "heard": r[4] or "", "answer": r[5] or ""}
+                for r in transcripts
+            ],
+            "alerts": [
+                {"id": r[0], "kind": r[1], "message": r[2], "created_at": r[3].isoformat()}
+                for r in alerts
+            ]
+        })
+    except Exception as e:
+        print("caller detail failed:", redact(e), flush=True)
+        return jsonify({"error": "לא ניתן לטעון את תיק המשתמש כרגע"}), 500
     finally:
         conn.close()
 
