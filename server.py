@@ -229,7 +229,7 @@ def system_prompt():
     extra = (cfg("extra_instructions") or "").strip()
     profile = caller(getattr(_tls, "phone", ""))
     # Fixed assistant personality per Yemot extension: 1/1 = Yiddish rosh yeshiva; 8 = Hebrew smart Rudy.
-    selected_mode = "yeshiva" if yiddish_mode() else "smart"
+    selected_mode = getattr(_tls, "assistant_mode", "yeshiva" if yiddish_mode() else "smart")
     tools_allowed = profile.get("tools_enabled", True) is not False
     key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode, tools_allowed)
     if key not in _prompt_cache:
@@ -343,9 +343,21 @@ def persist(section, value):
 
 app = Flask(__name__)
 
-# הגדרה חד-פעמית של שתי השלוחות בימות: 1.1 יידיש, 8 עברית.
-if os.environ.get("CONFIGURE_YEMOT_LANGUAGE_EXTENSIONS") == "1":
-    for extension_path, language in (("ivr2:1/1", "yi"), ("ivr2:8", "he")):
+# יצירה ועדכון של שש שלוחות AI בימות המשיח, לפי סגנון ושפה קבועים.
+# מפעילים פעם אחת באמצעות CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS=1 ב-Render.
+if os.environ.get("CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS") == "1":
+    yemot_extensions = (
+        ("ivr2:1", "he", "smart", "רודי חכם"),
+        ("ivr2:2", "he", "edgy", "רודי עוקצן"),
+        ("ivr2:3", "he", "psychologist", "פסיכולוגית"),
+        ("ivr2:4", "yi", "yeshiva", "ראש ישיבה"),
+        ("ivr2:5", "yi", "yiddish", "משפיע באידיש"),
+        ("ivr2:6", "he", "tools", "כלי AI"),
+        # Keep existing entry points working with the requested reassignment.
+        ("ivr2:1/1", "yi", "yeshiva", "ראש ישיבה"),
+        ("ivr2:8", "he", "smart", "רודי חכם"),
+    )
+    for extension_path, language, mode, title in yemot_extensions:
         try:
             setup_response = requests.get(
                 "https://www.call2all.co.il/ym/api/UpdateExtension",
@@ -353,13 +365,14 @@ if os.environ.get("CONFIGURE_YEMOT_LANGUAGE_EXTENSIONS") == "1":
                     "token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}",
                     "path": extension_path,
                     "type": "api",
-                    "api_link": f"https://yemot-smart-search.onrender.com/ivr?lang={language}",
+                    "title": title,
+                    "api_link": f"https://yemot-smart-search.onrender.com/ivr?lang={language}&mode={mode}",
                     "api_hangup_send": "yes",
                 },
                 timeout=20,
             )
             setup_response.raise_for_status()
-            print(f"Yemot {extension_path} language={language} update:", redact(setup_response.text)[:500], flush=True)
+            print(f"Yemot {extension_path} mode={mode} language={language} update:", redact(setup_response.text)[:500], flush=True)
         except Exception as setup_error:
             print(f"Yemot {extension_path} update failed:", redact(setup_error)[:300], flush=True)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
@@ -1352,13 +1365,14 @@ def worker_name(call_id, recorded, phone, use_yiddish):
             st["last"] = recorded
 
 
-def worker(call_id, recorded, phone="", use_yiddish=None):
+def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None):
     keys = all_keys()
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in keys else "default"
     _tls.kind = "chat"
     _tls.phone = phone
     _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
+    _tls.assistant_mode = assistant_mode or ("yiddish" if _tls.yiddish else "smart")
     _tls.record_path = "/1/1" if _tls.yiddish else "/8"
     _tls.extension_path = "/1/1" if _tls.yiddish else "/8"
     t0 = time.time()
@@ -1423,6 +1437,9 @@ def ivr():
     call_id = p.get("ApiCallId", "unknown")
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
+    requested_mode = (p.get("mode") or "").strip().lower()
+    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools"}
+    assistant_mode = requested_mode if requested_mode in allowed_modes else ("yiddish" if requested_lang in ("yi", "yiddish", "1") else "smart")
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
     _tls.record_path = "/1/1" if use_yiddish else "/8"
@@ -1489,7 +1506,7 @@ def ivr():
         st["t"] = time.time()
 
         # Phone admin entry is offered only on Hebrew extension 8 and only to mail-authorized callers.
-        if not use_yiddish and phone and EMAIL_ENABLED and phone_allowed(phone):
+        if not use_yiddish and assistant_mode == "smart" and phone and EMAIL_ENABLED and phone_allowed(phone):
             stage = st.get("admin_stage")
             if stage is None:
                 st["admin_stage"] = "code"
@@ -1620,7 +1637,7 @@ def ivr():
                 return Response(wait_command(), mimetype="text/plain")
             if recorded and not st.get("name_status"):
                 st["name_status"] = "processing"
-                threading.Thread(target=worker_name, args=(call_id, recorded, phone, use_yiddish), daemon=True).start()
+                threading.Thread(target=worker_name, args=(call_id, recorded, phone, use_yiddish, assistant_mode), daemon=True).start()
                 return Response(wait_command(), mimetype="text/plain")
             if st.get("name_status") == "done" and not st.get("name_question_prompted"):
                 st["name_question_prompted"] = True
