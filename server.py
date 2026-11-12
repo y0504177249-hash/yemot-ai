@@ -353,6 +353,9 @@ if os.environ.get("CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS") == "1":
         ("ivr2:4", "yi", "yeshiva", "ראש ישיבה"),
         ("ivr2:5", "yi", "yiddish", "משפיע באידיש"),
         ("ivr2:6", "he", "tools", "כלי AI"),
+        # Keep existing entry points working with the requested reassignment.
+        ("ivr2:1/1", "yi", "yeshiva", "ראש ישיבה"),
+        ("ivr2:8", "he", "smart", "רודי חכם"),
     )
     for extension_path, language, mode, title in yemot_extensions:
         try:
