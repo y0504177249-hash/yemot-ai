@@ -232,8 +232,10 @@ _prompt_cache = {}
 def system_prompt():
     contacts = cfg("mail_contacts")
     extra = (cfg("extra_instructions") or "").strip()
-    selected_mode = caller(getattr(_tls, "phone", "")).get("assistant_mode") or cfg("assistant_mode") or "smart"
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode)
+    profile = caller(getattr(_tls, "phone", ""))
+    selected_mode = profile.get("assistant_mode") or cfg("assistant_mode") or "smart"
+    tools_allowed = profile.get("tools_enabled", True) is not False
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode, tools_allowed)
     if key not in _prompt_cache:
         mode_prompts = {
             "smart": "סגנון רודי חכם: היה חד, מועיל, סקרן, מדויק וענייני. הסבר בפשטות והתאם את התשובה למשתמש.",
@@ -243,7 +245,9 @@ def system_prompt():
             "yiddish": "סגנון משפיע באידיש: ענה ביידיש טבעית, חמה וישיבתית בלבד, בלי אנגלית ובלי לעז.",
             "tools": "סגנון כלי AI: התמקד בביצוע משימות, חיפוש מידע, סיכום, ניסוח, חישוב והפעלת כלים זמינים. ציין כשאין לך אפשרות לבצע פעולה בפועל."
         }
-        text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT) + LOOKUP_PROMPT
+        text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
+        if tools_allowed:
+            text += LOOKUP_PROMPT
         text += " " + mode_prompts.get(selected_mode, mode_prompts["smart"])
         if voice_on():
             text += VOICE_PROMPT
@@ -1256,6 +1260,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
     change_voice = bool(data.get("change_voice")) if voice_on() else False
     lookup = data.get("lookup")
+    tools_allowed = caller(phone).get("tools_enabled", True) is not False
     send = data.get("send_email")
     mail = data.get("mail")
     confirm = data.get("confirm_pending")
@@ -1276,11 +1281,14 @@ def ask_gemini(call_id, audio_bytes, phone=""):
                 answer = handle_mail(call_id, mail, heard)
                 print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
         elif isinstance(lookup, dict) and (lookup.get("query") or heard):
-            _tls.kind = "lookup"
-            t = time.time()
-            found = do_lookup(lookup, heard)
-            print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
-            answer = found or "לא הצלחתי למצוא מידע על זה"
+            if not tools_allowed:
+                answer = "אין לך הרשאה להשתמש בכלי AI"
+            else:
+                _tls.kind = "lookup"
+                t = time.time()
+                found = do_lookup(lookup, heard)
+                print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
+                answer = found or "לא הצלחתי למצוא מידע על זה"
     except Exception as e:
         print("action error:", redact(e), flush=True)
         answer = "לא הצלחתי לבצע את הפעולה"
