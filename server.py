@@ -599,7 +599,8 @@ def db_load_caller(phone):
             current["enabled"] = bool(row[1])
             current["assigned_address"] = row[2] or ""
             current["email_address"] = row[3] or ""
-            current["email_enabled"] = bool(row[4])
+            current["email_enabled"] = bool(row[4]) or bool(current.get("mail"))
+            current["mail"] = bool(row[4]) or bool(current.get("mail"))
             current["chat_enabled"] = bool(row[5])
             current["assistant_mode"] = row[6] or "smart"
             current["tools_enabled"] = bool(row[7])
@@ -1269,7 +1270,9 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         if EMAIL_ENABLED and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
             print(f"mail request from {phone or 'unknown'}", flush=True)
             _tls.kind = "mail"
-            if not phone_allowed(phone):
+            profile = caller(phone)
+            profile_email_allowed = profile.get("email_enabled", profile.get("mail", phone_allowed(phone)))
+            if not profile_email_allowed or not phone_allowed(phone):
                 print("mail blocked: phone not allowed", flush=True)
                 answer = "אין לך הרשאה לגשת למיילים"
             elif confirm:
@@ -1978,7 +1981,8 @@ def admin_state():
                         "enabled": bool(row[2]),
                         "assigned_address": row[3] or "",
                         "email_address": row[4] or "",
-                        "email_enabled": bool(row[5]),
+                        "email_enabled": bool(row[5]) or bool(current.get("mail")),
+                        "mail": bool(row[5]) or bool(current.get("mail")),
                         "chat_enabled": bool(row[6]),
                         "assistant_mode": row[7] or "smart",
                         "tools_enabled": bool(row[8]),
