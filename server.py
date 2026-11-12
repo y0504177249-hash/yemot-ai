@@ -1783,7 +1783,7 @@ def personal_login():
     d = request.get_json(silent=True) or {}
     phone = re.sub(r"[^0-9]", "", str(d.get("phone", "")))[:15]
     pin = str(d.get("pin", ""))
-    if not re.fullmatch(r"\\d{5,15}", phone) or not re.fullmatch(r"\\d{6,12}", pin):
+    if not re.fullmatch(r"\d{5,15}", phone) or not re.fullmatch(r"\d{6,12}", pin):
         return jsonify({"error": "יש להזין מספר טלפון וקוד אישי תקינים"}), 400
     conn = db_connect()
     if conn is None:
@@ -1839,7 +1839,7 @@ def personal_profile():
 def admin_set_personal_pin(phone):
     phone = re.sub(r"[^0-9]", "", str(phone))[:15]
     pin = str((request.get_json(silent=True) or {}).get("pin", ""))
-    if not re.fullmatch(r"\\d{6,12}", pin):
+    if not re.fullmatch(r"\d{6,12}", pin):
         return jsonify({"error": "הקוד חייב להכיל 6 עד 12 ספרות"}), 400
     conn = db_connect()
     if conn is None:
