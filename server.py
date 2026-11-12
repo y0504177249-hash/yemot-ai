@@ -161,6 +161,7 @@ def settings_defaults():
         "mail_mode": "all" if ALLOW_ALL_PHONES else ("listed" if ALLOWED_PHONES else "off"),
         "mail_contacts": MAIL_CONTACTS,
         "extra_instructions": "",
+        "assistant_mode": "smart",
     }
 
 
@@ -231,9 +232,23 @@ _prompt_cache = {}
 def system_prompt():
     contacts = cfg("mail_contacts")
     extra = (cfg("extra_instructions") or "").strip()
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode())
+    profile = caller(getattr(_tls, "phone", ""))
+    selected_mode = profile.get("assistant_mode") or cfg("assistant_mode") or "smart"
+    tools_allowed = profile.get("tools_enabled", True) is not False
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode, tools_allowed)
     if key not in _prompt_cache:
-        text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT) + LOOKUP_PROMPT
+        mode_prompts = {
+            "smart": "סגנון רודי חכם: היה חד, מועיל, סקרן, מדויק וענייני. הסבר בפשטות והתאם את התשובה למשתמש.",
+            "edgy": "סגנון רודי עוקצן: השתמש בהומור חד, עקיצות קלילות ושנינות, אך אל תשפיל, תאיים או תפגע בקבוצות או באנשים באופן אכזרי.",
+            "psychologist": "סגנון פסיכולוגית: הקשיבי באמפתיה, שאלי שאלות פתוחות, שיקפי רגשות והציעי צעד קטן. אינך פסיכולוגית מוסמכת, אל תאבחני ואל תחליפי טיפול מקצועי.",
+            "yeshiva": "סגנון ראש ישיבה: דבר בחכמה, בנחת ובבהירות, עם משל קצר ומסר מעשי כשמתאים. אל תמציא ציטוטים או מקורות.",
+            "yiddish": "סגנון משפיע באידיש: ענה ביידיש טבעית, חמה וישיבתית בלבד, בלי אנגלית ובלי לעז.",
+            "tools": "סגנון כלי AI: התמקד בביצוע משימות, חיפוש מידע, סיכום, ניסוח, חישוב והפעלת כלים זמינים. ציין כשאין לך אפשרות לבצע פעולה בפועל."
+        }
+        text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
+        if tools_allowed:
+            text += LOOKUP_PROMPT
+        text += " " + mode_prompts.get(selected_mode, mode_prompts["smart"])
         if voice_on():
             text += VOICE_PROMPT
         if EMAIL_ENABLED:
@@ -439,6 +454,29 @@ def db_notify_key_pool_empty(phone):
         conn.close()
 
 
+def db_notify_runtime_error(phone, message):
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        clean_phone = re.sub(r"[^0-9]", "", str(phone or ""))[:30]
+        clean_message = redact(message or "שגיאת מערכת")[:500]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO admin_notifications(kind, phone, message)
+                       VALUES ('runtime_error', %s, %s)
+                       ON CONFLICT (kind, phone) WHERE resolved_at IS NULL DO UPDATE
+                       SET message = EXCLUDED.message, created_at = now()""",
+                    (clean_phone, clean_message))
+        return True
+    except Exception as e:
+        print("runtime error notification failed:", redact(e), flush=True)
+        return False
+    finally:
+        conn.close()
+
+
 def db_list_notifications():
     conn = db_connect()
     if conn is None:
@@ -474,6 +512,19 @@ def db_resolve_notification(notification_id):
         conn.close()
 
 
+def db_ensure_profile_columns(conn):
+    """Additive profile migration; safe to run against existing installations."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assigned_address TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_address TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS chat_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assistant_mode TEXT NOT NULL DEFAULT 'smart'")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS tools_enabled BOOLEAN NOT NULL DEFAULT TRUE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS history_enabled BOOLEAN NOT NULL DEFAULT TRUE")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS pin_hash TEXT NOT NULL DEFAULT ''")
+
+
 def db_save_caller(phone, profile):
     conn = db_connect()
     if conn is None:
@@ -481,14 +532,27 @@ def db_save_caller(phone, profile):
     try:
         with conn:
             with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
                 cur.execute(
-                    """INSERT INTO caller_profiles (phone, display_name, enabled, updated_at)
-                       VALUES (%s, %s, %s, now())
+                    """INSERT INTO caller_profiles
+                       (phone, display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode, tools_enabled, history_enabled, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                        ON CONFLICT (phone) DO UPDATE SET
                          display_name = EXCLUDED.display_name,
                          enabled = EXCLUDED.enabled,
+                         assigned_address = EXCLUDED.assigned_address,
+                         email_address = EXCLUDED.email_address,
+                         email_enabled = EXCLUDED.email_enabled,
+                         chat_enabled = EXCLUDED.chat_enabled,
+                         assistant_mode = EXCLUDED.assistant_mode,
+                         tools_enabled = EXCLUDED.tools_enabled,
+                         history_enabled = EXCLUDED.history_enabled,
                          updated_at = now()""",
-                    (phone, profile.get("name", ""), profile.get("enabled", True)),
+                    (phone, profile.get("name", ""), profile.get("enabled", True),
+                     profile.get("assigned_address", ""), profile.get("email_address", ""),
+                     bool(profile.get("email_enabled")), bool(profile.get("chat_enabled")),
+                     profile.get("assistant_mode", "smart"), bool(profile.get("tools_enabled", True)),
+                     bool(profile.get("history_enabled", True))),
                 )
         return True
     except Exception as e:
@@ -523,15 +587,26 @@ def db_load_caller(phone):
         return
     try:
         with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
             cur.execute(
-                "SELECT display_name, enabled FROM caller_profiles WHERE phone = %s",
+                """SELECT display_name, enabled, assigned_address, email_address, email_enabled, chat_enabled, assistant_mode, tools_enabled, history_enabled
+                   FROM caller_profiles WHERE phone = %s""",
                 (phone,),
             )
             row = cur.fetchone()
+        conn.commit()  # Persist additive schema migration after successful read.
         if row:
             current = dict(_store["callers"].get(phone) or {})
             current["name"] = row[0] or current.get("name", "")
             current["enabled"] = bool(row[1])
+            current["assigned_address"] = row[2] or ""
+            current["email_address"] = row[3] or ""
+            current["email_enabled"] = bool(row[4]) or bool(current.get("mail"))
+            current["mail"] = bool(row[4]) or bool(current.get("mail"))
+            current["chat_enabled"] = bool(row[5])
+            current["assistant_mode"] = row[6] or "smart"
+            current["tools_enabled"] = bool(row[7])
+            current["history_enabled"] = bool(row[8])
             _store["callers"][phone] = current
         else:
             # Migrate an existing locally/webhook-stored caller profile on first contact.
@@ -652,7 +727,7 @@ def admin_menu_text(message=""):
     return (prefix + f"תפריט ניהול. מצב העוזר: {enabled}. קול: {voice}. "
             "לבדיקת מצב הקש 1. להפעלה או כיבוי של העוזר הקש 2. למענה קולי הקש 3. "
             "להחלפת קול הקש 4. ליציאה לשיחה רגילה הקש 5. לתמלולי שיחות אחרונות הקש 6. "
-            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8.")
+            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8. ליציאה מהירה הקש סולמית או 0.")
 
 
 def admin_status_text():
@@ -1188,6 +1263,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     answer = (data.get("answer") or "").strip() or "לא הבנתי נסה שוב"
     change_voice = bool(data.get("change_voice")) if voice_on() else False
     lookup = data.get("lookup")
+    tools_allowed = caller(phone).get("tools_enabled", True) is not False
     send = data.get("send_email")
     mail = data.get("mail")
     confirm = data.get("confirm_pending")
@@ -1196,7 +1272,9 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         if EMAIL_ENABLED and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
             print(f"mail request from {phone or 'unknown'}", flush=True)
             _tls.kind = "mail"
-            if not phone_allowed(phone):
+            profile = caller(phone)
+            profile_email_allowed = profile.get("email_enabled", profile.get("mail", phone_allowed(phone)))
+            if not profile_email_allowed or not phone_allowed(phone):
                 print("mail blocked: phone not allowed", flush=True)
                 answer = "אין לך הרשאה לגשת למיילים"
             elif confirm:
@@ -1208,11 +1286,14 @@ def ask_gemini(call_id, audio_bytes, phone=""):
                 answer = handle_mail(call_id, mail, heard)
                 print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
         elif isinstance(lookup, dict) and (lookup.get("query") or heard):
-            _tls.kind = "lookup"
-            t = time.time()
-            found = do_lookup(lookup, heard)
-            print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
-            answer = found or "לא הצלחתי למצוא מידע על זה"
+            if not tools_allowed:
+                answer = "אין לך הרשאה להשתמש בכלי AI"
+            else:
+                _tls.kind = "lookup"
+                t = time.time()
+                found = do_lookup(lookup, heard)
+                print(f"timing: lookup {lookup.get('type')} {time.time() - t:.1f}s", flush=True)
+                answer = found or "לא הצלחתי למצוא מידע על זה"
     except Exception as e:
         print("action error:", redact(e), flush=True)
         answer = "לא הצלחתי לבצע את הפעולה"
@@ -1280,6 +1361,7 @@ def worker(call_id, recorded, phone="", use_yiddish=None):
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in keys else "default"
     _tls.kind = "chat"
+    _tls.phone = phone
     _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
     _tls.record_path = "/1/1" if _tls.yiddish else "/8"
     _tls.extension_path = "/1/1" if _tls.yiddish else "/8"
@@ -1298,6 +1380,7 @@ def worker(call_id, recorded, phone="", use_yiddish=None):
         change_voice = False
         failed = True
         err = redact(str(e))[:140]
+        db_notify_runtime_error(phone, err)
 
     audio_path = None
     if voice_on() and not failed:
@@ -1419,7 +1502,9 @@ def ivr():
                     mimetype="text/plain",
                 )
             if stage == "code":
-                if keypad:
+                if keypad in ("", "#"):
+                    st["admin_stage"] = "chat"
+                elif keypad:
                     if hmac.compare_digest(keypad, PHONE_ADMIN_CODE):
                         st["admin_stage"] = "menu"
                         return Response(admin_digits_command(admin_menu_text("הקוד אושר"), "admin_action", 1, 1), mimetype="text/plain")
@@ -1428,6 +1513,12 @@ def ivr():
                 # No digits means the caller pressed # to continue to the regular AI assistant.
                 st["admin_stage"] = "chat"
             elif stage == "menu":
+                if keypad in ("#", "0"):
+                    st["admin_stage"] = "chat"
+                    return Response(read_command("יצאת מתפריט הניהול. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
+                if not keypad:
+                    st["admin_stage"] = "chat"
+                    return Response(read_command("לא התקבלה בחירה. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
                 if keypad == "1":
                     message = admin_status_text()
                 elif keypad == "2":
@@ -1523,7 +1614,7 @@ def ivr():
             if not st.get("name_prompted"):
                 st["name_prompted"] = True
                 prompt = ("כדי איך זאל דיך קענען דערקענען ווייטער, זאג ביטע דיין נאמען." if use_yiddish
-                          else "כדי שאוכל לזהות אותך בשיחות הבאות, אמור בבקשה את שמך המלא.")
+                          else "כדי שאוכל לזהות אותך בשיחות הבאות, אמור בבקשה את שמך הפרטי.")
                 name_file = "n" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
                 return Response(
                     f"read=t-{clean_for_tts(prompt)}=question,no,record,{active_record_path()},{name_file},no,yes,no",
@@ -1621,10 +1712,16 @@ app.config.update(
 ADMIN_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
 _login_fails = collections.deque()
 _ip_fails = {}
+_personal_ip_fails = {}
 
 
 @app.after_request
 def admin_headers(resp):
+    if request.path.startswith("/personal"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
     if request.path.startswith("/admin"):
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["X-Frame-Options"] = "DENY"
@@ -1661,6 +1758,148 @@ def admin_required(f):
         return f(*a, **k)
 
     return wrapper
+
+
+def pin_hash_value(pin, salt=None):
+    salt = salt or os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 310000)
+    return base64.urlsafe_b64encode(salt).decode("ascii") + "$" + base64.urlsafe_b64encode(digest).decode("ascii")
+
+
+def verify_personal_pin(pin, stored):
+    try:
+        salt_b64, digest_b64 = stored.split("$", 1)
+        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+        expected = base64.urlsafe_b64decode(digest_b64.encode("ascii"))
+        actual = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, 310000)
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+@app.route("/personal")
+@app.route("/personal/")
+def personal_page():
+    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "personal.html"), mimetype="text/html")
+
+
+@app.route("/personal/login", methods=["POST"])
+def personal_login():
+    if request.headers.get("X-Requested-With") != "personal":
+        return jsonify({"error": "בקשה לא תקינה"}), 403
+    d = request.get_json(silent=True) or {}
+    phone = re.sub(r"[^0-9]", "", str(d.get("phone", "")))[:15]
+    pin = str(d.get("pin", ""))
+    if not re.fullmatch(r"\d{5,15}", phone) or not re.fullmatch(r"\d{6,12}", pin):
+        return jsonify({"error": "יש להזין מספר טלפון וקוד אישי תקינים"}), 400
+    ip = client_ip()
+    now = time.time()
+    attempts = [t for t in _personal_ip_fails.get(ip, []) if now - t < 600]
+    _personal_ip_fails[ip] = attempts
+    if len(attempts) >= 8:
+        return jsonify({"error": "יותר מדי ניסיונות כניסה. נסה שוב בעוד כמה דקות"}), 429
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "המערכת אינה זמינה כרגע"}), 503
+    try:
+        with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
+            cur.execute("SELECT pin_hash, enabled FROM caller_profiles WHERE phone=%s", (phone,))
+            row = cur.fetchone()
+        conn.commit()  # Persist the additive profile migration.
+        if not row or not row[0] or not row[1] or not verify_personal_pin(pin, row[0]):
+            _personal_ip_fails[ip].append(now)
+            return jsonify({"error": "מספר הטלפון או הקוד האישי שגויים"}), 401
+        _personal_ip_fails.pop(ip, None)
+        session.clear()
+        session["personal_phone"] = phone
+        session.permanent = True
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/personal/logout", methods=["POST"])
+def personal_logout():
+    session.pop("personal_phone", None)
+    return jsonify({"ok": True})
+
+
+@app.route("/personal/api/profile")
+def personal_profile():
+    phone = session.get("personal_phone")
+    if not phone:
+        return jsonify({"error": "נדרשת כניסה"}), 401
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "המערכת אינה זמינה כרגע"}), 503
+    try:
+        with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
+            cur.execute("SELECT phone, display_name, assigned_address, assistant_mode, tools_enabled, history_enabled FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
+            row = cur.fetchone()
+            if not row:
+                session.pop("personal_phone", None)
+                return jsonify({"error": "החשבון אינו פעיל"}), 403
+            transcripts = []
+            if row[5]:
+                cur.execute("SELECT created_at, heard, answer FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 100", (phone,))
+                transcripts = [{"created_at": x[0].isoformat(), "heard": x[1] or "", "answer": x[2] or ""} for x in cur.fetchall()]
+        conn.commit()  # Persist additive profile migration.
+        return jsonify({"profile": {"phone": row[0], "name": row[1] or "", "assigned_address": row[2] or "", "assistant_mode": row[3] or "smart", "tools_enabled": bool(row[4]), "history_enabled": bool(row[5])}, "transcripts": transcripts})
+    finally:
+        conn.close()
+
+
+@app.route("/personal/api/pin", methods=["POST"])
+def personal_change_pin():
+    phone = session.get("personal_phone")
+    if not phone:
+        return jsonify({"error": "נדרשת כניסה"}), 401
+    if request.headers.get("X-Requested-With") != "personal":
+        return jsonify({"error": "בקשה לא תקינה"}), 403
+    d = request.get_json(silent=True) or {}
+    old_pin = str(d.get("old_pin", ""))
+    new_pin = str(d.get("new_pin", ""))
+    if not re.fullmatch(r"\d{6,12}", new_pin):
+        return jsonify({"error": "הקוד החדש חייב להכיל 6 עד 12 ספרות"}), 400
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute("SELECT pin_hash FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
+                row = cur.fetchone()
+                if not row or not row[0] or not verify_personal_pin(old_pin, row[0]):
+                    return jsonify({"error": "הקוד הנוכחי שגוי"}), 401
+                cur.execute("UPDATE caller_profiles SET pin_hash=%s, updated_at=now() WHERE phone=%s", (pin_hash_value(new_pin), phone))
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/caller/<phone>/pin", methods=["POST"])
+@admin_required
+def admin_set_personal_pin(phone):
+    phone = re.sub(r"[^0-9]", "", str(phone))[:15]
+    pin = str((request.get_json(silent=True) or {}).get("pin", ""))
+    if not re.fullmatch(r"\d{6,12}", pin):
+        return jsonify({"error": "הקוד חייב להכיל 6 עד 12 ספרות"}), 400
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute("UPDATE caller_profiles SET pin_hash=%s, updated_at=now() WHERE phone=%s", (pin_hash_value(pin), phone))
+                if not cur.rowcount:
+                    return jsonify({"error": "המשתמש לא נמצא במסד הנתונים"}), 404
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
 
 
 @app.route("/admin")
@@ -1874,6 +2113,38 @@ def admin_yiddish_chat():
 @admin_required
 def admin_state():
     maybe_refresh()
+    # Populate the admin directory from the persistent database, not only the current process cache.
+    conn = db_connect()
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute(
+                    """SELECT phone, display_name, enabled, assigned_address, email_address,
+                              email_enabled, chat_enabled, assistant_mode, tools_enabled, history_enabled
+                       FROM caller_profiles ORDER BY phone""")
+                for row in cur.fetchall():
+                    ph = str(row[0] or "")
+                    current = dict(_store["callers"].get(ph) or {})
+                    current.update({
+                        "name": row[1] or current.get("name", ""),
+                        "enabled": bool(row[2]),
+                        "assigned_address": row[3] or "",
+                        "email_address": row[4] or "",
+                        "email_enabled": bool(row[5]) or bool(current.get("mail")),
+                        "mail": bool(row[5]) or bool(current.get("mail")),
+                        "chat_enabled": bool(row[6]),
+                        "assistant_mode": row[7] or "smart",
+                        "tools_enabled": bool(row[8]),
+                        "history_enabled": bool(row[9])
+                    })
+                    _store["callers"][ph] = current
+                    _caller_loaded.add(ph)
+            conn.commit()  # Persist additive profile migration.
+        except Exception as e:
+            print("admin profile directory load failed:", redact(e), flush=True)
+        finally:
+            conn.close()
     now = time.time()
     env_keys = dict(GEMINI_KEYS)
     rows = []
@@ -1884,6 +2155,13 @@ def admin_state():
             "phone": ph, "name": c.get("name", ""), "mask": key_mask(key),
             "has_key": bool(c.get("key")), "from_env": bool(env_keys.get(ph)) and not c.get("key"),
             "mail": bool(c.get("mail")), "enabled": c.get("enabled", True),
+            "assigned_address": c.get("assigned_address", ""),
+            "email_address": c.get("email_address", ""),
+            "email_enabled": bool(c.get("email_enabled")),
+            "chat_enabled": bool(c.get("chat_enabled")),
+            "assistant_mode": c.get("assistant_mode", "smart"),
+            "tools_enabled": bool(c.get("tools_enabled", True)),
+            "history_enabled": bool(c.get("history_enabled", True)),
             "state": quota_state(ph if key else "default"),
         })
     try:
@@ -1931,6 +2209,24 @@ def admin_caller_put():
         cur.pop("key", None)
     if "mail" in d:
         cur["mail"] = bool(d["mail"])
+    for field, limit in (("assigned_address", 300), ("email_address", 254)):
+        if field in d:
+            cur[field] = str(d.get(field) or "").strip()[:limit]
+    if "email_enabled" in d:
+        cur["email_enabled"] = bool(d["email_enabled"])
+        cur["mail"] = bool(d["email_enabled"])
+    if "chat_enabled" in d:
+        cur["chat_enabled"] = bool(d["chat_enabled"])
+    if "assistant_mode" in d:
+        allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools"}
+        mode = str(d.get("assistant_mode") or "smart")
+        if mode not in allowed_modes:
+            return jsonify({"error": "סגנון העוזר אינו תקין"}), 400
+        cur["assistant_mode"] = mode
+    if "tools_enabled" in d:
+        cur["tools_enabled"] = bool(d["tools_enabled"])
+    if "history_enabled" in d:
+        cur["history_enabled"] = bool(d["history_enabled"])
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
     callers[phone] = cur
@@ -2041,6 +2337,60 @@ def admin_transcripts():
     except Exception as e:
         print("transcript search failed:", redact(e), flush=True)
         return jsonify({"error": "לא ניתן לחפש בארכיון כרגע"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/caller/<phone>", methods=["GET"])
+@admin_required
+def admin_caller_detail(phone):
+    phone = re.sub(r"[^0-9]", "", str(phone))[:15]
+    if not phone:
+        return jsonify({"error": "מספר טלפון לא תקין"}), 400
+    db_load_caller(phone)
+    profile = dict(caller(phone))
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.cursor() as cur:
+            db_ensure_profile_columns(conn)
+            cur.execute(
+                """SELECT id, call_id, caller_name, created_at, heard, answer
+                   FROM call_transcripts WHERE phone=%s
+                   ORDER BY created_at DESC, id DESC LIMIT 200""", (phone,))
+            transcripts = cur.fetchall()
+            cur.execute(
+                """SELECT id, kind, message, created_at FROM admin_notifications
+                   WHERE phone=%s AND resolved_at IS NULL
+                   ORDER BY created_at DESC LIMIT 50""", (phone,))
+            alerts = cur.fetchall()
+        conn.commit()  # Persist additive profile migration.
+        return jsonify({
+            "profile": {
+                "phone": phone, "name": profile.get("name", ""),
+                "assigned_address": profile.get("assigned_address", ""),
+                "email_address": profile.get("email_address", ""),
+                "email_enabled": bool(profile.get("email_enabled")),
+                "chat_enabled": bool(profile.get("chat_enabled")),
+                "assistant_mode": profile.get("assistant_mode", "smart"),
+                "tools_enabled": bool(profile.get("tools_enabled", True)),
+                "history_enabled": bool(profile.get("history_enabled", True)),
+                "enabled": bool(profile.get("enabled", True))
+            },
+            "transcripts": [
+                {"id": r[0], "call_id": r[1], "name": r[2] or "",
+                 "created_at": r[3].isoformat(), "heard": r[4] or "", "answer": r[5] or ""}
+                for r in transcripts
+            ],
+            "alerts": [
+                {"id": r[0], "kind": r[1], "message": r[2], "created_at": r[3].isoformat()}
+                for r in alerts
+            ]
+        })
+    except Exception as e:
+        print("caller detail failed:", redact(e), flush=True)
+        return jsonify({"error": "לא ניתן לטעון את תיק המשתמש כרגע"}), 500
     finally:
         conn.close()
 

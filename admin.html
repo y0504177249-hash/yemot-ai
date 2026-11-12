@@ -238,6 +238,7 @@
       }
       if (c.has_key || c.from_env) tools.push(h('button', { class: 'quiet', onclick: function () { testKey({ phone: c.phone }); } }, 'בדיקת מפתח'));
       if (c.has_key) tools.push(h('button', { class: 'quiet', onclick: function () { act('מסיר מפתח', function () { return api('PUT', 'caller', { phone: c.phone, name: c.name, clear_key: true }); }); } }, 'הסרת המפתח'));
+      tools.push(h('button', { class: 'quiet', onclick: function () { profileFolder(c.phone); } }, 'פתיחת תיק אישי'));
       tools.push(h('button', { class: 'danger', onclick: function () {
         if (confirm('למחוק את ' + (c.name || c.phone) + '?')) act('מוחק', function () { return api('DELETE', 'caller/' + encodeURIComponent(c.phone)); });
       } }, 'מחיקה'));
@@ -266,6 +267,91 @@
       h('h2', null, 'קווים ומפתחות'),
       h('p', { class: 'sub' }, 'לכל מספר אפשר לתת מפתח Gemini משלו, כדי שלכל אדם תהיה מכסה נפרדת. מספר שאינו ברשימה משתמש במפתח הראשי.'),
       main, rows, add);
+  }
+
+  /* ---------- תיק אישי לכל מספר טלפון ---------- */
+  function profileFolder(phone) {
+    say('טוען תיק אישי...');
+    api('GET', 'caller/' + encodeURIComponent(phone)).then(function (data) {
+      var p = data.profile || {};
+      var name = h('input', { type: 'text', value: p.name || '', maxlength: 40 });
+      var address = h('input', { type: 'text', value: p.assigned_address || '', maxlength: 300, placeholder: 'כתובת API / כתובת שהוקצתה למשתמש' });
+      var email = h('input', { type: 'email', value: p.email_address || '', maxlength: 254, placeholder: 'name@example.com' });
+      var emailEnabled = h('input', { type: 'checkbox', checked: !!p.email_enabled });
+      var chatEnabled = h('input', { type: 'checkbox', checked: !!p.chat_enabled });
+      var mode = h('select', null,
+        [
+          ['smart', '1. רודי חכם'],
+          ['edgy', '2. רודי עוקצן ופוגעני'],
+          ['psychologist', '3. פסיכולוגית'],
+          ['yeshiva', '4. בסגנון ראש ישיבה'],
+          ['yiddish', '5. משפיע באידיש'],
+          ['tools', '6. כלי AI']
+        ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
+      );
+      var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
+      var personalPin = h('input', { type: 'password', inputmode: 'numeric', maxlength: 12, placeholder: '6–12 ספרות' });
+      var pinSave = h('button', { class: 'quiet', onclick: function () {
+        if (!/^\d{6,12}$/.test(personalPin.value)) { say('הקוד חייב להכיל 6 עד 12 ספרות', true); return; }
+        api('POST', 'caller/' + encodeURIComponent(phone) + '/pin', { pin: personalPin.value }).then(function () { personalPin.value = ''; say('הקוד האישי נשמר בהצלחה'); }).catch(function (e) { say(e.message, true); });
+      } }, 'שמירת קוד אישי');
+      var historyEnabled = h('input', { type: 'checkbox', checked: p.history_enabled !== false });
+      var enabled = h('input', { type: 'checkbox', checked: p.enabled !== false });
+      var content = h('section', null,
+        h('h2', null, '7. אזור אישי'),
+        h('p', { class: 'sub' }, 'מספר הטלפון הוא המזהה הייחודי של המשתמש. היסטוריית השיחות וההתראות משויכות אליו.'),
+        h('div', { class: 'ident' }, h('strong', { class: 'phone num' }, phone)),
+        h('label', { class: 'f' }, 'שם פרטי', name),
+        h('label', { class: 'f' }, 'קוד כניסה לאזור האישי (יוצג פעם אחת בלבד)', personalPin),
+        pinSave,
+        h('label', { class: 'f' }, 'כתובת שהוקצתה למשתמש', address),
+        h('label', { class: 'f' }, 'כתובת דוא״ל / תיבה', email),
+        h('label', { class: 'check' }, emailEnabled, 'אפשר גישה למייל עבור המשתמש'),
+        h('p', { class: 'sub' }, 'הערה: חיבור OAuth נפרד לתיבת Gmail של כל משתמש עדיין אינו מוגדר; כרגע נשמרים פרטי המשתמש והרשאת הגישה.'),
+        h('label', { class: 'check' }, chatEnabled, 'צ׳אט – הגדרה בלבד, ממתין לחיבור השירות'),
+        h('label', { class: 'f' }, 'תפריט העוזר – סגנון למשתמש', mode),
+        h('label', { class: 'check' }, toolsEnabled, 'הרשאה לכלי AI'),
+        h('label', { class: 'check' }, historyEnabled, 'הרשאה להצגת היסטוריית שיחות באזור האישי (תופעל עם התחברות משתמשים)'),
+        h('label', { class: 'check' }, enabled, 'המשתמש מורשה להשתמש במערכת'),
+        h('div', { class: 'bar' },
+          h('button', { onclick: function () {
+            act('שומר תיק אישי', function () {
+              return api('PUT', 'caller', {
+                phone: phone, name: name.value, assigned_address: address.value,
+                email_address: email.value, email_enabled: emailEnabled.checked,
+                chat_enabled: chatEnabled.checked, assistant_mode: mode.value, tools_enabled: toolsEnabled.checked, history_enabled: historyEnabled.checked, enabled: enabled.checked
+              });
+            });
+          } }, 'שמירת פרטי המשתמש'),
+          h('button', { class: 'quiet', onclick: load }, 'חזרה לרשימת המשתמשים')
+        )
+      );
+      var alerts = h('section', null,
+        h('h2', null, 'התראות ותקלות'),
+        data.alerts && data.alerts.length ? data.alerts.map(function (a) {
+          return h('article', { class: 'line' },
+            h('span', { class: 'lamp warn' }),
+            h('div', null, h('strong', null, a.message),
+              h('div', { class: 'sub' }, new Date(a.created_at).toLocaleString('he-IL'))));
+        }) : h('p', { class: 'sub' }, 'אין כרגע התראות פתוחות למשתמש זה.')
+      );
+      var history = h('section', null,
+        h('h2', null, 'שיחות ותמלולים'),
+        h('p', { class: 'sub' }, 'מוצגות עד 200 שיחות אחרונות של מספר זה.'),
+        data.transcripts && data.transcripts.length ? data.transcripts.map(function (t) {
+          return h('article', { class: 'line' },
+            h('span', { class: 'lamp ok' }),
+            h('div', null,
+              h('div', { class: 'ident' }, h('strong', null, new Date(t.created_at).toLocaleString('he-IL'))),
+              h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המשתמש: ' + t.heard),
+              h('p', { style: 'margin-top:6px; white-space:pre-wrap' }, 'העוזר: ' + t.answer)));
+        }) : h('p', { class: 'sub' }, 'עדיין אין תמלולי שיחות למספר הזה.')
+      );
+      app.replaceChildren(header(),
+        h('div', { class: 'bar' }, h('button', { class: 'quiet', onclick: load }, 'חזרה לניהול הראשי')),
+        content, alerts, history);
+      window.scrollTo(0, 0);
+    }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
 
   function uploadMusic(input, lang) {
