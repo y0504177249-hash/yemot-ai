@@ -463,6 +463,64 @@
     return h('section', null, kids);
   }
 
+  /* ---------- הודעות שמע ---------- */
+  function audioPanel() {
+    var picker = h('input', { type: 'file', accept: '.zip,.mp3,application/zip,audio/mpeg' });
+    var status = h('p', { class: 'sub' }, 'אפשר להעלות ZIP עם הודעות המערכת או קובץ MP3 בודד.');
+    var rows = h('div', null);
+    function loadAudio() {
+      rows.replaceChildren(h('p', { class: 'sub' }, 'טוען קובצי שמע...'));
+      api('GET', 'audio').then(function (data) {
+        rows.replaceChildren();
+        if (!data.items || !data.items.length) {
+          rows.append(h('p', { class: 'sub' }, 'עדיין לא הועלו הודעות שמע לפרויקט הזה.'));
+          return;
+        }
+        data.items.forEach(function (item) {
+          var player = h('audio', {
+            controls: true, preload: 'none',
+            src: '/admin/api/audio/' + encodeURIComponent(item.filename),
+            style: 'display:block;width:100%;max-width:420px;margin-top:8px'
+          });
+          var del = h('button', { class: 'danger', type: 'button', onclick: function () {
+            if (!confirm('למחוק את קובץ השמע ' + item.filename + '?')) return;
+            api('DELETE', 'audio/' + encodeURIComponent(item.filename)).then(loadAudio).catch(function (e) { status.textContent = e.message; });
+          } }, 'מחיקה');
+          rows.append(h('article', { class: 'line' },
+            h('div', null,
+              h('strong', null, item.filename),
+              h('div', { class: 'sub' }, (item.size_bytes / 1024).toFixed(1) + ' KB · ' + new Date(item.created_at).toLocaleString('he-IL')),
+              player),
+            del));
+        });
+      }).catch(function (e) { rows.replaceChildren(h('p', { class: 'note bad' }, e.message)); });
+    }
+    function upload() {
+      var file = picker.files && picker.files[0];
+      if (!file) { status.textContent = 'בחר קובץ ZIP או MP3.'; return; }
+      if (file.size > 25 * 1024 * 1024) { status.textContent = 'הקובץ גדול מ־25MB.'; return; }
+      var data = new FormData(); data.append('file', file);
+      status.textContent = 'מעלה ושומר במסד הנתונים...';
+      fetch('/admin/api/audio', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'admin' }, body: data
+      }).then(function (r) {
+        return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'ההעלאה נכשלה'); return j; });
+      }).then(function (j) {
+        status.textContent = 'הועלו ' + j.uploaded + ' קובצי שמע. קובץ קיים באותו שם הוחלף.';
+        picker.value = ''; loadAudio();
+      }).catch(function (e) { status.textContent = e.message; });
+    }
+    var section = h('section', null,
+      h('h2', null, 'הודעות שמע'),
+      h('p', { class: 'sub' }, 'העלה קובצי MP3 או ZIP של הודעות המערכת. הקבצים נשמרים במסד הנתונים ומופרדים בין הפרויקטים.'),
+      h('label', { class: 'f' }, 'בחירת קובץ ZIP או MP3'), picker,
+      h('div', { class: 'bar' }, h('button', { type: 'button', onclick: upload }, 'העלאת הודעות שמע')),
+      status, rows);
+    loadAudio();
+    return section;
+  }
+
   /* ---------- ארכיון תמלולים ---------- */
   function transcriptsPanel() {
     var phone = h('input', { type: 'text', placeholder: 'מספר טלפון', inputmode: 'numeric' });
@@ -588,7 +646,7 @@
     return box;
   }
 
-  function render() { app.replaceChildren(header(), notificationsPanel(), callersPanel(), keyPoolPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
+  function render() { app.replaceChildren(header(), notificationsPanel(), callersPanel(), keyPoolPanel(), databasePanel(), audioPanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
   function load() {
     return api('GET', 'state').then(function (j) { S = j; render(); }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
