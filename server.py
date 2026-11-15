@@ -1,5 +1,6 @@
 import os
 import io
+import zipfile
 import re
 import wave
 import math
@@ -34,6 +35,7 @@ YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+AUDIO_PROJECT = os.environ.get("AUDIO_PROJECT", "yemot-ai-1").strip() or "yemot-ai-1"
 # מפתח Gemini נפרד לכל מתקשר (לפי מספר טלפון), כדי שלכל אדם תהיה מכסה משלו. למשל {"0501234567": "AIza..."}
 try:
     GEMINI_KEYS = json.loads(os.environ.get("GEMINI_KEYS", "{}"))
@@ -489,7 +491,7 @@ _made_dirs = set()    # תיקיות ימות שכבר נוצרו בתהליך �
 
 def db_init(conn):
     # יוצר את הטבלאות הדרושות אם אינן קיימות, כדי שחיבור מסד נתונים ריק יעבוד מיד
-    with conn:
+    with conn.transaction():
         with conn.cursor() as cur:
             cur.execute("""CREATE TABLE IF NOT EXISTS caller_profiles (
                 phone VARCHAR(30) PRIMARY KEY,
@@ -531,6 +533,15 @@ def db_init(conn):
                 audio_path TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
             cur.execute("CREATE INDEX IF NOT EXISTS voice_forum_posts_created_idx ON voice_forum_posts(created_at DESC)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS admin_audio_files (
+                project_key TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'audio/mpeg',
+                data BYTEA NOT NULL,
+                size_bytes BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (project_key, filename))""")
+            cur.execute("CREATE INDEX IF NOT EXISTS admin_audio_files_project_created_idx ON admin_audio_files(project_key, created_at DESC)")
     db_ensure_profile_columns(conn)
     conn.commit()
 
@@ -3709,6 +3720,149 @@ def admin_music_upload():
     except Exception as e:
         print("admin music upload failed:", redact(e), flush=True)
         return jsonify({"error": "העלאת המנגינה נכשלה. בדוק את החיבור לימות המשיח ונסה שוב."}), 502
+
+
+
+@app.route("/admin/api/audio", methods=["GET"])
+@admin_required
+def admin_audio_list():
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT filename, size_bytes, created_at
+                   FROM admin_audio_files WHERE project_key=%s
+                   ORDER BY filename""",
+                (AUDIO_PROJECT,))
+            rows = cur.fetchall()
+        return jsonify({"items": [
+            {"filename": r[0], "size_bytes": int(r[1]), "created_at": r[2].isoformat()}
+            for r in rows
+        ]})
+    except Exception as e:
+        print("admin audio list failed:", redact(e), flush=True)
+        return jsonify({"error": "טעינת קובצי השמע נכשלה"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/audio", methods=["POST"])
+@admin_required
+def admin_audio_upload():
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"error": "בחר קובץ ZIP או MP3"}), 400
+    raw = uploaded.read(25 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 25 * 1024 * 1024:
+        return jsonify({"error": "הקובץ ריק או גדול מ־25MB"}), 413
+
+    files = []
+    if uploaded.filename.lower().endswith(".mp3"):
+        files = [(re.sub(r"[^A-Za-z0-9._-]+", "-", uploaded.filename.rsplit("/", 1)[-1]).strip(".-"), raw)]
+    elif uploaded.filename.lower().endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                entries = [x for x in archive.infolist() if not x.is_dir()]
+                if len(entries) > 100:
+                    return jsonify({"error": "בארכיון יש יותר מ־100 קבצים"}), 400
+                total = sum(x.file_size for x in entries)
+                if total > 100 * 1024 * 1024:
+                    return jsonify({"error": "גודל הקבצים לאחר חילוץ חורג מ־100MB"}), 413
+                seen = set()
+                for entry in entries:
+                    path = entry.filename.replace("\\\\", "/")
+                    parts = path.split("/")
+                    if path.startswith("/") or any(part == ".." for part in parts):
+                        return jsonify({"error": "הארכיון מכיל נתיב קובץ לא תקין"}), 400
+                    base = parts[-1]
+                    if not base.lower().endswith(".mp3"):
+                        continue
+                    name = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip(".-")
+                    if not name or not name.lower().endswith(".mp3") or entry.file_size <= 0 or entry.file_size > 15 * 1024 * 1024:
+                        return jsonify({"error": "נמצא קובץ MP3 ריק, גדול מדי או בעל שם לא תקין"}), 400
+                    if name in seen:
+                        return jsonify({"error": "יש שמות קבצים כפולים בארכיון: " + name}), 400
+                    seen.add(name)
+                    files.append((name, archive.read(entry)))
+        except (zipfile.BadZipFile, RuntimeError, OSError):
+            return jsonify({"error": "קובץ ZIP פגום או לא ניתן לחילוץ"}), 400
+    else:
+        return jsonify({"error": "יש לבחור קובץ ZIP או MP3"}), 400
+
+    if not files:
+        return jsonify({"error": "לא נמצאו קובצי MP3 בארכיון"}), 400
+    if len(files) > 100 or sum(len(data) for _, data in files) > 100 * 1024 * 1024:
+        return jsonify({"error": "היקף קובצי השמע חורג מהמותר"}), 413
+
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                for filename, data in files:
+                    cur.execute(
+                        """INSERT INTO admin_audio_files
+                           (project_key, filename, content_type, data, size_bytes, created_at)
+                           VALUES (%s, %s, 'audio/mpeg', %s, %s, now())
+                           ON CONFLICT (project_key, filename) DO UPDATE SET
+                             content_type=EXCLUDED.content_type, data=EXCLUDED.data,
+                             size_bytes=EXCLUDED.size_bytes, created_at=now()""",
+                        (AUDIO_PROJECT, filename, data, len(data)))
+        return jsonify({"ok": True, "uploaded": len(files), "files": [x[0] for x in files]})
+    except Exception as e:
+        print("admin audio upload failed:", redact(e), flush=True)
+        return jsonify({"error": "שמירת קובצי השמע נכשלה"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/audio/<filename>", methods=["GET"])
+@admin_required
+def admin_audio_get(filename):
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT data FROM admin_audio_files WHERE project_key=%s AND filename=%s",
+                (AUDIO_PROJECT, filename))
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "קובץ השמע לא נמצא"}), 404
+        return send_file(io.BytesIO(bytes(row[0])), mimetype="audio/mpeg",
+                         as_attachment=False, download_name=filename, max_age=0)
+    except Exception as e:
+        print("admin audio playback failed:", redact(e), flush=True)
+        return jsonify({"error": "השמעת קובץ השמע נכשלה"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/audio/<filename>", methods=["DELETE"])
+@admin_required
+def admin_audio_delete(filename):
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM admin_audio_files WHERE project_key=%s AND filename=%s",
+                    (AUDIO_PROJECT, filename))
+                deleted = cur.rowcount
+        if not deleted:
+            return jsonify({"error": "קובץ השמע לא נמצא"}), 404
+        return jsonify({"ok": True})
+    except Exception as e:
+        print("admin audio delete failed:", redact(e), flush=True)
+        return jsonify({"error": "מחיקת קובץ השמע נכשלה"}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/admin/api/settings", methods=["PUT"])
