@@ -275,9 +275,10 @@ def system_prompt():
     profile = caller(getattr(_tls, "phone", ""))
     # Fixed assistant personality per Yemot extension: 1/1 = Yiddish rosh yeshiva; 8 = Hebrew smart Rudy.
     selected_mode = getattr(_tls, "assistant_mode", "yeshiva" if yiddish_mode() else "smart")
+    tool_action = getattr(_tls, "tool_action", "") or ""
     tools_allowed = profile.get("tools_enabled", True) is not False
     mail_ok = selected_mode in ("smart", "tools") and tools_allowed and mail_enabled_for(getattr(_tls, "phone", ""))
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed)
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed, tool_action)
     if key not in _prompt_cache:
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
         if tools_allowed:
@@ -287,6 +288,17 @@ def system_prompt():
             text += VOICE_PROMPT
         if mail_ok:
             text += build_email_prompt(contacts)
+        if selected_mode == "tools" and tools_allowed:
+            action_prompts = {
+                "mail": "המשתמש נמצא בתפריט המיילים. בצע רק פעולות מייל שהתבקשו במפורש. לשליחה השתמש ב-send_email, והשרת יבקש אישור לפני שליחה.",
+                "podcast": "המשתמש בחר יצירת הסכת. צור הסכת עברי קצר באורך כשתי דקות, בשיחה טבעית בין שני מגישים. החזר create_podcast={\"title\":\"כותרת\",\"dialogue\":[{\"speaker\":\"Host1\",\"text\":\"...\"},{\"speaker\":\"Host2\",\"text\":\"...\"}]}. צור 8 עד 12 חילופי דברים, עם מידע מדויק וללא המצאת עובדות.",
+                "image": "המשתמש בחר יצירת תמונה ושליחתה למייל. לפני יצירה ודא שיש כתובת יעד מפורשת או כתובת שמורה בפרופיל. החזר create_image={\"prompt\":\"תיאור מדויק של התמונה\",\"to\":\"כתובת או שם איש קשר\",\"subject\":\"נושא המייל\",\"body\":\"טקסט קצר למייל\"}. אל תטען שהתמונה נשלחה; השרת יפיק אותה ויבקש אישור שליחה.",
+                "file": "המשתמש בחר קריאת קבצים באמצעות AI. חפש תחילה מיילים עם קובץ מצורף באמצעות mail={\"action\":\"search\",\"query\":\"has:attachment\"}. לאחר בחירת מייל, השתמש ב-mail={\"action\":\"read_attachment\",\"index\":1,\"attachment_index\":1}. סכם בעברית את הקובץ לפי בקשת המשתמש. אם אין גישה למייל או לקובץ, אמור זאת במפורש.",
+                "writing": "המשתמש בחר כתיבה וניסוח. עזור בכתיבת טקסטים, עריכה וניסוח לפי המטרה והטון שביקש.",
+                "research": "המשתמש בחר חיפוש ומחקר. השתמש בכלי lookup הקיים כשנדרש מידע עובדתי או עדכני.",
+                "planning": "המשתמש בחר תכנון וחישובים. בצע תכנון וחישובים בזהירות והצג את התוצאה בצורה קצרה המתאימה להקראה."
+            }
+            text += " " + action_prompts.get(tool_action, "")
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
         _prompt_cache[key] = text
@@ -1003,6 +1015,45 @@ def prepare_email(call_id, action):
     )
 
 
+def send_mail_attachment(to_addr, subject, body, filename, mime_type, content_b64):
+    subject = (subject or "הודעה")[:200]
+    body = (body or "")[:5000]
+    filename = re.sub(r"[^0-9A-Za-z._-א-ת]", "_", str(filename or "attachment.bin"))[:120]
+    content_b64 = str(content_b64 or "")
+    if not content_b64 or len(content_b64) > 12_000_000:
+        raise ValueError("קובץ מצורף ריק או גדול מדי")
+    hook_url, hook_secret = mail_target()
+    if hook_url and hook_secret:
+        r = requests.post(
+            hook_url,
+            json={"secret": hook_secret, "action": "send_attachment", "to": to_addr,
+                  "subject": subject, "body": body, "filename": filename,
+                  "mimeType": mime_type or "application/octet-stream", "content": content_b64},
+            timeout=45,
+        )
+        r.raise_for_status()
+        try:
+            result = r.json()
+        except Exception:
+            result = {"ok": r.text.strip() == "ok"}
+        if not result.get("ok"):
+            raise RuntimeError("שירות המייל לא אישר שליחת קובץ מצורף")
+        return
+    r = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": BREVO_API_KEY, "content-type": "application/json"},
+        json={
+            "sender": {"email": MAIL_FROM, "name": "העוזר החכם"},
+            "to": [{"email": to_addr}],
+            "subject": subject,
+            "textContent": body,
+            "attachment": [{"name": filename, "content": content_b64}],
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+
+
 def confirm_email(call_id, decision):
     with lock:
         st = calls.get(call_id)
@@ -1013,7 +1064,13 @@ def confirm_email(call_id, decision):
         return "אין מייל ממתין לשליחה"
     if str(decision).lower() != "yes":
         return "ביטלתי את המייל"
-    send_mail_to(pend["addr"], pend["subject"], pend["body"])
+    attachment = pend.get("attachment")
+    if attachment:
+        send_mail_attachment(pend["addr"], pend["subject"], pend["body"],
+                             attachment.get("filename"), attachment.get("mime_type"),
+                             attachment.get("content"))
+    else:
+        send_mail_to(pend["addr"], pend["subject"], pend["body"])
     return "המייל נשלח"
 
 
@@ -1061,6 +1118,44 @@ def handle_mail(call_id, mail, heard):
             types.GenerateContentConfig(system_instruction=MAIL_READ_PROMPT, max_output_tokens=900),
         )
         return (out.text or "").strip() or "לא הצלחתי לקרוא את המייל"
+    if act == "read_attachment":
+        try:
+            idx = int(mail.get("index") or 1)
+            attachment_idx = int(mail.get("attachment_index") or 1)
+        except Exception:
+            idx, attachment_idx = 1, 1
+        with lock:
+            st = calls.get(call_id)
+            ids = list(st.get("mails", [])) if st else []
+        if not ids or idx < 1 or idx > len(ids):
+            return "קודם בקש רשימת מיילים עם קבצים מצורפים"
+        result = mail_json({"action": "attachments", "id": ids[idx - 1]})
+        attachments = result.get("attachments", [])
+        if not attachments:
+            return "לא נמצא קובץ מצורף במייל הזה"
+        if attachment_idx < 1 or attachment_idx > len(attachments):
+            return "מספר הקובץ המצורף אינו תקין"
+        attachment = attachments[attachment_idx - 1]
+        try:
+            raw = base64.b64decode(attachment.get("data") or "", validate=True)
+        except Exception:
+            return "לא הצלחתי לפתוח את הקובץ המצורף"
+        if not raw or len(raw) > 6 * 1024 * 1024:
+            return "הקובץ ריק או גדול מדי לקריאה דרך השלוחה"
+        mime_type = (attachment.get("mimeType") or "application/octet-stream").split(";")[0]
+        filename = attachment.get("filename") or "קובץ מצורף"
+        prompt = (
+            "קרא את הקובץ המצורף בשם " + filename + ". בקשת המשתמש: " + (heard or "סכם את הקובץ") +
+            ". ענה בעברית, הבדל בין מה שכתוב בקובץ לבין מסקנות שלך, ואל תמציא פרטים."
+        )
+        out = call_model(
+            [types.Part.from_bytes(data=raw, mime_type=mime_type), types.Part(text=prompt)],
+            types.GenerateContentConfig(
+                system_instruction="אתה קורא מסמכים. הסתמך רק על תוכן הקובץ, ציין אם חלק ממנו אינו קריא, וענה בעברית ברורה המתאימה להקראה.",
+                max_output_tokens=900,
+            ),
+        )
+        return (out.text or "").strip() or "לא הצלחתי לקרוא את הקובץ"
     return "לא הבנתי מה לעשות עם המיילים"
 
 
@@ -1437,6 +1532,134 @@ def do_lookup(lookup, heard):
         return ""
 
 
+def podcast_tts_wav(dialogue):
+    last_err = None
+    contents = []
+    for item in dialogue:
+        speaker = item["speaker"]
+        style = "מגיש פודקאסט טבעי, ברור ומעניין; קצב דיבור נעים עם הפסקות טבעיות"
+        contents.append({
+            "type": "text",
+            "text": item["text"],
+            "annotations": [{"type": "speech_metadata", "speaker": speaker, "style": style}],
+        })
+    request_input = [{"type": "user_input", "content": contents}]
+    for model_name in TTS_MODELS:
+        try:
+            interaction = cur_client().interactions.create(
+                model=model_name,
+                input=request_input,
+                response_format={"type": "audio"},
+                generation_config={
+                    "speech_config": {
+                        "speakers": [
+                            {"speaker": "Host1", "voice": "Kore"},
+                            {"speaker": "Host2", "voice": "Puck"},
+                        ]
+                    }
+                },
+            )
+            audio = getattr(interaction, "output_audio", None)
+            encoded = getattr(audio, "data", None) if audio else None
+            if not encoded:
+                raise RuntimeError("TTS returned no podcast audio")
+            data = base64.b64decode(encoded) if isinstance(encoded, str) else encoded
+            if data[:4] != b"RIFF":
+                raise RuntimeError("TTS returned audio without WAV header")
+            return data
+        except Exception as e:
+            last_err = e
+            print("podcast tts failed:", redact(e)[:200], flush=True)
+    raise last_err or RuntimeError("no podcast TTS model available")
+
+
+def create_podcast_audio(call_id, payload):
+    dialogue = payload.get("dialogue") if isinstance(payload, dict) else None
+    if not isinstance(dialogue, list) or len(dialogue) < 4:
+        return "לא הצלחתי להכין תסריט הסכת תקין. נסה לתאר שוב את הנושא."
+    clean = []
+    for item in dialogue[:16]:
+        if not isinstance(item, dict):
+            continue
+        speaker = str(item.get("speaker") or "").strip()
+        text_value = str(item.get("text") or "").strip()
+        if speaker not in ("Host1", "Host2") or not text_value:
+            continue
+        clean.append({"speaker": speaker, "text": text_value[:900]})
+    if len(clean) < 4:
+        return "תסריט ההסכת קצר מדי. נסה שוב."
+    full_chars = sum(len(x["text"]) for x in clean)
+    if full_chars > 9000:
+        return "ההסכת ארוך מדי ליצירה אחת. בקש פרק קצר יותר."
+    wav = podcast_tts_wav(clean)
+    name = "pod" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
+    path = upload_to_yemot(wav, name)
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["generated_audio"] = path
+            st["podcast_title"] = str(payload.get("title") or "הסכת")[:100]
+    return "ההסכת נוצר. הקובץ מוכן להאזנה."
+
+
+def generate_image_bytes(prompt):
+    api_key = all_keys().get(getattr(_tls, "phone", "")) or GEMINI_API_KEY
+    image_client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=90000))
+    last_err = None
+    for model_name in ("gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"):
+        try:
+            response = image_client.models.generate_content(model=model_name, contents=str(prompt)[:4000])
+            for part in (getattr(response, "parts", None) or []):
+                inline = getattr(part, "inline_data", None)
+                data = getattr(inline, "data", None) if inline else None
+                if data:
+                    return (base64.b64decode(data) if isinstance(data, str) else data,
+                            getattr(inline, "mime_type", None) or "image/png")
+            raise RuntimeError("image model returned no image")
+        except Exception as e:
+            last_err = e
+            print("image generation failed:", model_name, redact(e)[:180], flush=True)
+    raise last_err or RuntimeError("no image model available")
+
+
+def prepare_image_email(call_id, phone, action):
+    to = (action.get("to") or caller(phone).get("email_address") or "").strip()
+    if not to:
+        return "כדי לשלוח את התמונה, אמור תחילה את כתובת המייל של הנמען."
+    if not mail_enabled_for(phone) or not EMAIL_ENABLED:
+        return "אין כרגע חיבור מייל פעיל בחשבון הזה. התמונה לא נשלחה."
+    candidates = resolve_recipient(to)
+    if not candidates:
+        return "לא מצאתי כתובת מייל מתאימה. אמור את כתובת המייל המלאה."
+    if len(candidates) > 1:
+        options = ", ".join((c.get("name") or "") + " " + speak_email(c["email"]) for c in candidates[:3])
+        return "מצאתי כמה כתובות אפשריות: " + options + ". אמור כתובת מלאה."
+    prompt = (action.get("prompt") or "").strip()
+    if not prompt:
+        return "תאר איזו תמונה ליצור."
+    raw, mime_type = generate_image_bytes(prompt)
+    if len(raw) > 8 * 1024 * 1024:
+        return "התמונה שנוצרה גדולה מדי לשליחה במייל."
+    filename = "ai-image-" + re.sub(r"[^0-9A-Za-z]", "", str(call_id))[:10] + ".png"
+    attachment = {
+        "filename": filename,
+        "mime_type": mime_type,
+        "content": base64.b64encode(raw).decode("ascii"),
+    }
+    c = candidates[0]
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["pending"] = {
+                "addr": c["email"],
+                "subject": (action.get("subject") or "תמונה שנוצרה באמצעות בינה מלאכותית")[:200],
+                "body": (action.get("body") or "מצורפת התמונה שביקשת ליצור.")[:2000],
+                "attachment": attachment,
+            }
+    target = (c.get("name") + " בכתובת ") if c.get("name") else "לכתובת "
+    return "יצרתי את התמונה. אני עומד לשלוח אותה " + target + speak_email(c["email"]) + ". האם לשלוח? אמור כן או לא."
+
+
 def ask_gemini(call_id, audio_bytes, phone=""):
     history = histories.setdefault(call_id, [])
     assistant_mode = getattr(_tls, "assistant_mode", "smart")
@@ -1466,6 +1689,9 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     send = data.get("send_email")
     mail = data.get("mail")
     confirm = data.get("confirm_pending")
+    create_podcast = data.get("create_podcast")
+    create_image = data.get("create_image")
+    return_to_menu = bool(data.get("return_to_menu"))
 
     try:
         if mail_ok and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
@@ -1482,6 +1708,18 @@ def ask_gemini(call_id, audio_bytes, phone=""):
                 t = time.time()
                 answer = handle_mail(call_id, mail, heard)
                 print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
+        elif isinstance(create_podcast, dict):
+            if not tools_allowed or assistant_mode != "tools":
+                answer = "אין לך הרשאה להשתמש בכלי יצירת הסכתים"
+            else:
+                _tls.kind = "podcast"
+                answer = create_podcast_audio(call_id, create_podcast)
+        elif isinstance(create_image, dict):
+            if not tools_allowed or assistant_mode != "tools":
+                answer = "אין לך הרשאה להשתמש בכלי יצירת תמונות"
+            else:
+                _tls.kind = "image"
+                answer = prepare_image_email(call_id, phone, create_image)
         elif isinstance(lookup, dict) and (lookup.get("query") or heard):
             if not tools_allowed:
                 answer = "אין לך הרשאה להשתמש בכלי AI"
@@ -1494,6 +1732,12 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     except Exception as e:
         print("action error:", redact(e), flush=True)
         answer = "לא הצלחתי לבצע את הפעולה"
+
+    if return_to_menu and assistant_mode == "tools":
+        with lock:
+            st = calls.get(call_id)
+            if st is not None:
+                st["return_tools_menu"] = True
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
@@ -1557,7 +1801,7 @@ def worker_name(call_id, recorded, phone, use_yiddish):
             st["last"] = recorded
 
 
-def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None):
+def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None, tool_action=None):
     keys = all_keys()
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in keys else "default"
@@ -1565,6 +1809,7 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None):
     _tls.phone = phone
     _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
     _tls.assistant_mode = assistant_mode or ("yiddish" if _tls.yiddish else "smart")
+    _tls.tool_action = tool_action or ""
     _tls.phone = phone
     _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if _tls.yiddish else "/8")
     t0 = time.time()
@@ -1585,7 +1830,11 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None):
         db_notify_runtime_error(phone, err)
 
     audio_path = None
-    if voice_on() and not failed:
+    with lock:
+        current_state = calls.get(call_id)
+        if current_state is not None:
+            audio_path = current_state.pop("generated_audio", None)
+    if not audio_path and voice_on() and not failed:
         with lock:
             st = calls.get(call_id)
             if st is not None and change_voice:
@@ -1665,6 +1914,96 @@ def key_pool_has(phone):
             conn.close()
     except Exception:
         return False
+
+
+TOOLS_MENU_ACTIONS = {
+    "1": ("mail", "מיילים", "אמור מה תרצה לעשות במיילים. למשל לקרוא הודעות, לחפש מייל או לנסח ולשלוח הודעה."),
+    "2": ("podcast", "יצירת הסכת", "אמור את נושא ההסכת, למי הוא מיועד ומה חשוב לכלול בו."),
+    "3": ("image", "יצירת תמונה למייל", "תאר את התמונה הרצויה וציין לאיזו כתובת לשלוח אותה."),
+    "4": ("file", "קריאת קובץ", "שלח קובץ כקובץ מצורף לתיבת המייל המחוברת, ואז בקש לקרוא ולסכם אותו."),
+    "5": ("writing", "כתיבה וניסוח", "אמור איזה טקסט תרצה לכתוב או לשפר."),
+    "6": ("research", "חיפוש ומחקר", "אמור מה תרצה לחקור או לבדוק."),
+    "7": ("planning", "תכנון וחישובים", "אמור מה תרצה לתכנן או לחשב."),
+}
+
+
+def tools_menu_text():
+    return (
+        "ברוכים הבאים למרכז כלי הבינה המלאכותית. "
+        "לשימוש חופשי בבינה עם כל הכלים הקש אפס. "
+        "למיילים הקש אחת. ליצירת הסכת הקש שתיים. "
+        "ליצירת תמונה ושליחתה למייל הקש שלוש. "
+        "לקריאת קובץ באמצעות בינה מלאכותית הקש ארבע. "
+        "לכתיבה וניסוח הקש חמש. לחיפוש ומחקר הקש שש. "
+        "לתכנון וחישובים הקש שבע. לשמיעת התפריט מחדש הקש תשע."
+    )
+
+
+def tools_area(st, p, call_id, phone, recorded, use_yiddish):
+    if st.get("tools_chat"):
+        return None
+
+    if st.get("tools_recording"):
+        if recorded and recorded != st.get("last"):
+            st["last"] = recorded
+            st["status"] = "processing"
+            st["started"] = time.time()
+            st["tools_recording"] = False
+            action = st.get("tools_action") or ""
+            threading.Thread(
+                target=worker,
+                args=(call_id, recorded, phone, use_yiddish, "tools", action),
+                daemon=True,
+            ).start()
+            return Response(wait_command(), mimetype="text/plain")
+        return Response(
+            read_command(st.get("tools_prompt") or "אמור את בקשתך ובסיום הקש סולמית", call_id, st["turn"]),
+            mimetype="text/plain",
+        )
+
+    if st.get("tools_busy"):
+        if st.get("status") == "processing":
+            return Response(wait_command(), mimetype="text/plain")
+        if st.get("status") == "done":
+            audio = st.get("audio")
+            st["status"] = "idle"
+            st["tools_busy"] = False
+            st.pop("tools_action", None)
+            st.pop("tools_prompt", None)
+            if audio:
+                return Response(
+                    f"id_list_message=f-{audio}&go_to_folder={active_extension_path()}",
+                    mimetype="text/plain",
+                )
+
+    if st.get("awaiting"):
+        st["awaiting"] = False
+        val = (p.get(st.get("field", "")) or "").strip()
+        if val == "0":
+            st["tools_chat"] = True
+            st["tools_action"] = ""
+            st["turn"] += 1
+            return Response(
+                read_command(
+                    "בחרת שימוש חופשי בבינה. אפשר לבקש כל פעולה. כדי לחזור לתפריט אמור חזרה לתפריט.",
+                    call_id, st["turn"],
+                ),
+                mimetype="text/plain",
+            )
+        if val == "9":
+            return _digits(st, tools_menu_text())
+        selected = TOOLS_MENU_ACTIONS.get(val)
+        if not selected:
+            return _digits(st, tools_menu_text() + " לא זיהיתי את הבחירה.")
+        action, label, prompt = selected
+        st["tools_action"] = action
+        st["tools_prompt"] = prompt
+        st["tools_busy"] = True
+        st["tools_recording"] = True
+        st["turn"] += 1
+        return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
+
+    return _digits(st, tools_menu_text())
 
 
 def personal_menu_text(phone, message=""):
@@ -2008,6 +2347,24 @@ def ivr():
                 prompt = ("א דאנק. וואס ווילסטו פרעגן?" if use_yiddish else "תודה. עכשיו אפשר לשאול את השאלה שלך.")
                 return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
 
+        if assistant_mode == "tools" and not st.get("tools_chat"):
+            tools_response = tools_area(st, p, call_id, phone, recorded, use_yiddish)
+            if tools_response is not None:
+                return tools_response
+
+        if assistant_mode == "tools" and st.get("tools_chat") and st.get("return_tools_menu") and st.get("status") == "done":
+            st["return_tools_menu"] = False
+            st["tools_chat"] = False
+            st["status"] = "idle"
+            st["turn"] += 1
+            audio = st.get("audio")
+            if audio:
+                return Response(
+                    f"id_list_message=f-{audio}&go_to_folder={active_extension_path()}",
+                    mimetype="text/plain",
+                )
+            return _digits(st, tools_menu_text())
+
         # הקלטה חדשה של שאלה: מתחילים עיבוד ברקע ומשמיעים המתנה
         if recorded and recorded != st["last"]:
             st["last"] = recorded
@@ -2016,9 +2373,10 @@ def ivr():
             threading.Thread(target=worker, args=(call_id, recorded, phone, use_yiddish, assistant_mode), daemon=True).start()
             return Response(wait_command(), mimetype="text/plain")
 
-        # עיבוד בעיצומו: ממשיכים להמתין, אבל לא יותר מ-70 שניות
+        # עיבוד בעיצומו: פעולות יצירה עשויות לדרוש יותר זמן מהתשובה הקולית הרגילה.
         if st["status"] == "processing":
-            if time.time() - st["started"] > 70:
+            processing_limit = 150 if assistant_mode == "tools" else 70
+            if time.time() - st["started"] > processing_limit:
                 st["status"] = "idle"
                 st["turn"] += 1
                 return Response(
@@ -2777,6 +3135,28 @@ function doPost(e) {
     if (d.action === 'send') {
       GmailApp.sendEmail(d.to, d.subject || 'הודעה', d.body || '');
       return ContentService.createTextOutput('ok');
+    }
+    if (d.action === 'send_attachment') {
+      const bytes = Utilities.base64Decode(d.content || '');
+      const blob = Utilities.newBlob(bytes, d.mimeType || 'application/octet-stream', d.filename || 'attachment.bin');
+      GmailApp.sendEmail(d.to, d.subject || 'הודעה', d.body || '', {attachments: [blob]});
+      return out({ok: true});
+    }
+    if (d.action === 'attachments') {
+      const message = GmailApp.getMessageById(d.id);
+      const all = message.getAttachments({includeInlineImages: false, includeAttachments: true});
+      const items = [];
+      let tooLarge = 0;
+      all.slice(0, 5).forEach(function (a) {
+        const bytes = a.getBytes();
+        if (bytes.length > 6 * 1024 * 1024) { tooLarge++; return; }
+        items.push({
+          filename: a.getName(),
+          mimeType: a.getContentType(),
+          data: Utilities.base64Encode(bytes)
+        });
+      });
+      return out({attachments: items, tooLarge: tooLarge});
     }
     if (d.action === 'search') {
       const th = GmailApp.search(d.query || 'in:inbox', 0, Math.min(d.max || 5, 10));
