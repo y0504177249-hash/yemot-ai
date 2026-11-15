@@ -713,8 +713,8 @@ def archive_yemot_history(phone, assistant_mode, call_id, heard, answer, use_yid
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         safe_call = re.sub(r"[^0-9A-Za-z_-]", "", str(call_id))[:24] or "call"
         filename = f"{stamp}-{int(time.time() * 1000) % 1000000:06d}-{safe_call}.txt"
-        content = (f"assistant: {mode}\\nphone: {clean_phone}\\ncall: {safe_call}\\n\\n"
-                   f"מתקשר: {heard[:5000]}\\nעוזר: {answer[:5000]}\\n")
+        content = (f"assistant: {mode}\nphone: {clean_phone}\ncall: {safe_call}\n\n"
+                   f"מתקשר: {heard[:5000]}\nעוזר: {answer[:5000]}\n")
         response = requests.post(
             "https://www.call2all.co.il/ym/api/UploadFile",
             data={"token": token, "path": "ivr2:" + folder + "/" + filename, "convertAudio": "0"},
@@ -737,14 +737,16 @@ def db_admin_recent_transcripts(limit=5):
         return []
     try:
         with conn.cursor() as cur:
+            db_ensure_transcript_columns(conn)
             cur.execute(
-                """SELECT phone, caller_name, heard, answer, created_at
+                """SELECT phone, caller_name, heard, answer, created_at, assistant_mode
                    FROM call_transcripts ORDER BY created_at DESC, id DESC LIMIT %s""",
                 (max(1, min(int(limit), 10)),),
             )
             rows = cur.fetchall()
         return [{"phone": r[0] or "", "name": r[1] or "", "heard": r[2] or "",
-                 "answer": r[3] or "", "created_at": r[4].strftime("%d/%m %H:%M") if r[4] else ""}
+                 "answer": r[3] or "", "created_at": r[4].strftime("%d/%m %H:%M") if r[4] else "",
+                 "assistant_mode": r[5] or "smart"}
                 for r in rows]
     except Exception as e:
         print("admin transcript query failed:", redact(e), flush=True)
@@ -2304,7 +2306,7 @@ def admin_caller_put():
     if "chat_enabled" in d:
         cur["chat_enabled"] = bool(d["chat_enabled"])
     if "assistant_mode" in d:
-        allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools"}
+        allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}
         mode = str(d.get("assistant_mode") or "smart")
         if mode not in allowed_modes:
             return jsonify({"error": "סגנון העוזר אינו תקין"}), 400
