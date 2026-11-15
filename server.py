@@ -692,11 +692,11 @@ def yemot_history_folder(assistant_mode):
     return f"{base}/history/{mode}/{phone}"
 
 
-def archive_yemot_history(phone, assistant_mode, call_id, heard, answer):
+def archive_yemot_history(phone, assistant_mode, call_id, heard, answer, use_yiddish=False):
     """Write one UTF-8 transcript file to a per-assistant/per-caller Yemot folder."""
     try:
         mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"} else "smart"
-        base = "/1/1" if getattr(_tls, "yiddish", False) else "/8"
+        base = "/1/1" if use_yiddish else "/8"
         clean_phone = re.sub(r"[^0-9]", "", str(phone or ""))[:15]
         if not clean_phone:
             return False
@@ -1373,7 +1373,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         if phone and history_enabled:
             db_save_transcript(call_id, phone, heard, answer, assistant_mode)
             threading.Thread(target=archive_yemot_history,
-                             args=(phone, assistant_mode, call_id, heard, answer),
+                             args=(phone, assistant_mode, call_id, heard, answer, bool(getattr(_tls, "yiddish", False))),
                              daemon=True).start()
     return answer, change_voice
 
@@ -1501,13 +1501,13 @@ def ivr():
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
     allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}
-    assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if requested_lang in ("yi", "yiddish", "1") else "smart"))
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
     _tls.record_path = "/1/1" if use_yiddish else "/8"
     _tls.extension_path = "/1/1" if use_yiddish else "/8"
     maybe_refresh()
     db_load_caller(phone)
+    assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if use_yiddish else "smart"))
 
     if p.get("hangup") == "yes":
         with lock:
@@ -2444,8 +2444,9 @@ def admin_caller_detail(phone):
     try:
         with conn.cursor() as cur:
             db_ensure_profile_columns(conn)
+            db_ensure_transcript_columns(conn)
             cur.execute(
-                """SELECT id, call_id, caller_name, created_at, heard, answer
+                """SELECT id, call_id, caller_name, created_at, heard, answer, assistant_mode
                    FROM call_transcripts WHERE phone=%s
                    ORDER BY created_at DESC, id DESC LIMIT 200""", (phone,))
             transcripts = cur.fetchall()
@@ -2469,7 +2470,8 @@ def admin_caller_detail(phone):
             },
             "transcripts": [
                 {"id": r[0], "call_id": r[1], "name": r[2] or "",
-                 "created_at": r[3].isoformat(), "heard": r[4] or "", "answer": r[5] or ""}
+                 "created_at": r[3].isoformat(), "heard": r[4] or "", "answer": r[5] or "",
+                 "assistant_mode": r[6] or "smart"}
                 for r in transcripts
             ],
             "alerts": [
