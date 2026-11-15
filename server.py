@@ -1203,10 +1203,13 @@ def download_recording(path):
         raise RuntimeError("Yemot returned an empty recording")
     return r.content
 
+# Keep only known current fallback IDs; the old gemini-3.8-flash-lite ID
+# returned 404 and must not be retried, even if it remains in an env override.
+_UNAVAILABLE_FALLBACK_MODELS = {"gemini-3.8-flash-lite"}
 FALLBACK_MODELS = [
     x.strip()
-    for x in os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-3.8-flash-lite,gemini-3.5-flash-lite,gemini-3.5-flash").split(",")
-    if x.strip()
+    for x in os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-3.5-flash-lite,gemini-3.5-flash").split(",")
+    if x.strip() and x.strip() not in _UNAVAILABLE_FALLBACK_MODELS
 ]
 _bad_models = {}  # שם מודל -> זמן (epoch) שעד אליו מדלגים עליו
 _discovered = {"done": False, "names": []}
@@ -3787,6 +3790,13 @@ def admin_reset_quota():
     _bad_reason.clear()
     return jsonify({"ok": True})
 
+
+# Run additive schema setup during startup rather than waiting for the first
+# caller request. This creates missing tables/columns (including the voice
+# forum table) while preserving all existing rows.
+_startup_db_conn = db_connect()
+if _startup_db_conn is not None:
+    _startup_db_conn.close()
 
 maybe_refresh()
 
