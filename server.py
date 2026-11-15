@@ -280,7 +280,7 @@ def system_prompt():
     selected_mode = getattr(_tls, "assistant_mode", "yeshiva" if yiddish_mode() else "smart")
     tool_action = getattr(_tls, "tool_action", "") or ""
     tools_allowed = profile.get("tools_enabled", True) is not False
-    mail_ok = selected_mode in ("smart", "tools") and tools_allowed and mail_enabled_for(getattr(_tls, "phone", ""))
+    mail_ok = selected_mode in ("smart", "tools", "central") and tools_allowed and mail_enabled_for(getattr(_tls, "phone", ""))
     key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed, tool_action)
     if key not in _prompt_cache:
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
@@ -291,7 +291,7 @@ def system_prompt():
             text += VOICE_PROMPT
         if mail_ok:
             text += build_email_prompt(contacts)
-        if selected_mode == "tools" and tools_allowed:
+        if selected_mode in ("tools", "central") and tools_allowed:
             action_prompts = {
                 "mail": "המשתמש נמצא בתפריט המיילים. בצע רק פעולות מייל שהתבקשו במפורש. לשליחה השתמש ב-send_email, והשרת יבקש אישור לפני שליחה.",
                 "podcast": "המשתמש בחר יצירת הסכת. צור הסכת עברי קצר באורך כשתי דקות, בשיחה טבעית בין שני מגישים. החזר create_podcast={\"title\":\"כותרת\",\"dialogue\":[{\"speaker\":\"Host1\",\"text\":\"...\"},{\"speaker\":\"Host2\",\"text\":\"...\"}]}. צור 8 עד 12 חילופי דברים, עם מידע מדויק וללא המצאת עובדות.",
@@ -826,7 +826,7 @@ def db_save_transcript(call_id, phone, heard, answer, assistant_mode="smart"):
 
 
 def yemot_history_folder(assistant_mode):
-    mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"} else "smart"
+    mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "central"} else "smart"
     base = "/1/1" if getattr(_tls, "yiddish", False) else "/8"
     phone = re.sub(r"[^0-9]", "", str(getattr(_tls, "phone", "") or ""))[:15]
     return f"{base}/history/{mode}/{phone}"
@@ -835,7 +835,7 @@ def yemot_history_folder(assistant_mode):
 def archive_yemot_history(phone, assistant_mode, call_id, heard, answer, use_yiddish=False):
     """Write one UTF-8 transcript file to a per-assistant/per-caller Yemot folder."""
     try:
-        mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"} else "smart"
+        mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "central"} else "smart"
         base = "/1/1" if use_yiddish else "/8"
         clean_phone = re.sub(r"[^0-9]", "", str(phone or ""))[:15]
         if not clean_phone:
@@ -1700,7 +1700,7 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     with lock:
         st0 = calls.get(call_id)
         has_pending = bool(st0 and st0.get("pending"))
-    mail_ok = getattr(_tls, "assistant_mode", "smart") in ("smart", "tools") and mail_enabled_for(phone)
+    mail_ok = getattr(_tls, "assistant_mode", "smart") in ("smart", "tools", "central") and mail_enabled_for(phone)
     if has_pending and mail_ok:
         parts.append(types.Part(text="הערת מערכת: יש מייל ממתין לאישור המשתמש."))
     contents = list(history) + [types.Content(role="user", parts=parts)]
@@ -1734,13 +1734,13 @@ def ask_gemini(call_id, audio_bytes, phone=""):
                 answer = handle_mail(call_id, mail, heard)
                 print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
         elif isinstance(create_podcast, dict):
-            if not tools_allowed or assistant_mode != "tools":
+            if not tools_allowed or assistant_mode not in ("tools", "central"):
                 answer = "אין לך הרשאה להשתמש בכלי יצירת הסכתים"
             else:
                 _tls.kind = "podcast"
                 answer = create_podcast_audio(call_id, create_podcast)
         elif isinstance(create_image, dict):
-            if not tools_allowed or assistant_mode != "tools":
+            if not tools_allowed or assistant_mode not in ("tools", "central"):
                 answer = "אין לך הרשאה להשתמש בכלי יצירת תמונות"
             else:
                 _tls.kind = "image"
@@ -1766,6 +1766,10 @@ def ask_gemini(call_id, audio_bytes, phone=""):
                     st["return_main_menu"] = True
                 elif assistant_mode == "tools":
                     st["return_tools_menu"] = True
+                elif assistant_mode == "central":
+                    st["main_menu"] = True
+                    st["return_main_menu"] = True
+                    st["menu_stage"] = "root"
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
@@ -2048,6 +2052,7 @@ def main_menu_text(message=""):
     prefix = (message + ". ") if message else ""
     return (
         prefix + "ברוכים הבאים למערכת הבינה. "
+        "לעוזר הבינה המרכזי הקש אפס. "
         "לתפריט כל סוגי הבינות הקש אחת. "
         "לכלי איי איי הקש שתיים. "
         "לכלים שימושיים הקש שלוש. "
@@ -2095,7 +2100,23 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 st["menu_stage"] = "forum"
                 st["forum_stage"] = "menu"
                 return _digits(st, forum_menu_text())
-            if val in ("0", "9", ""):
+            if val == "0":
+                st["selected_assistant_mode"] = "central"
+                st["menu_stage"] = "assistant_chat"
+                st["main_menu"] = True
+                st["status"] = "idle"
+                st["last"] = None
+                st["tools_chat"] = False
+                st.pop("tools_action", None)
+                st["turn"] += 1
+                return Response(
+                    read_command(
+                        "ברוכים הבאים לעוזר הבינה המרכזי. אפשר לשאול כל שאלה או לבקש עזרה. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
+                        call_id, st["turn"],
+                    ),
+                    mimetype="text/plain",
+                )
+            if val in ("9", ""):
                 return _digits(st, main_menu_text())
             return _digits(st, main_menu_text("לא זיהיתי את הבחירה"))
         if stage == "assistants":
@@ -2595,7 +2616,7 @@ def ivr():
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
-    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "personal", "menu"}
+    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "central", "personal", "menu"}
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
     api_ext = re.sub(r"[^0-9/]", "", str(p.get("ApiExtension", ""))).strip("/")
@@ -2605,7 +2626,11 @@ def ivr():
     maybe_refresh()
     db_load_caller(phone)
     assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if use_yiddish else "smart"))
-    if requested_mode == "menu" or (api_ext in ("", "8", "1/1") and requested_mode != "personal"):
+    if requested_mode == "menu":
+        assistant_mode = "menu"
+    elif api_ext == "0" and requested_mode != "personal":
+        assistant_mode = "central"
+    elif api_ext in ("", "8", "1/1") and requested_mode != "personal":
         assistant_mode = "menu"
 
     if p.get("hangup") == "yes":
@@ -2999,8 +3024,8 @@ def personal_profile():
                 return jsonify({"error": "החשבון אינו פעיל"}), 403
             transcripts = []
             if row[5]:
-                cur.execute("SELECT created_at, heard, answer FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 100", (phone,))
-                transcripts = [{"created_at": x[0].isoformat(), "heard": x[1] or "", "answer": x[2] or ""} for x in cur.fetchall()]
+                cur.execute("SELECT created_at, heard, answer, assistant_mode FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 100", (phone,))
+                transcripts = [{"created_at": x[0].isoformat(), "heard": x[1] or "", "answer": x[2] or "", "assistant_mode": x[3] or "smart"} for x in cur.fetchall()]
         conn.commit()  # Persist additive profile migration.
         return jsonify({"profile": {"phone": row[0], "name": row[1] or "", "assigned_address": row[2] or "", "assistant_mode": row[3] or "smart", "tools_enabled": bool(row[4]), "history_enabled": bool(row[5])}, "transcripts": transcripts})
     finally:
@@ -3379,7 +3404,7 @@ def admin_caller_put():
     if "chat_enabled" in d:
         cur["chat_enabled"] = bool(d["chat_enabled"])
     if "assistant_mode" in d:
-        allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}
+        allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "central"}
         mode = str(d.get("assistant_mode") or "smart")
         if mode not in allowed_modes:
             return jsonify({"error": "סגנון העוזר אינו תקין"}), 400
@@ -3494,7 +3519,7 @@ def admin_transcripts():
             clauses.append("created_at >= %s::date"); params.append(date_from)
         if date_to:
             clauses.append("created_at < (%s::date + interval '1 day')"); params.append(date_to)
-        if assistant_mode_filter in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}:
+        if assistant_mode_filter in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "central"}:
             clauses.append("assistant_mode = %s"); params.append(assistant_mode_filter)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with conn.cursor() as cur:
@@ -3737,10 +3762,27 @@ def admin_audio_list():
                    ORDER BY filename""",
                 (AUDIO_PROJECT,))
             rows = cur.fetchall()
-        return jsonify({"items": [
-            {"filename": r[0], "size_bytes": int(r[1]), "created_at": r[2].isoformat()}
-            for r in rows
-        ]})
+        audio_labels = {
+            1: "תפריט ראשי", 2: "עוזר מרכזי", 3: "בחירת סוג בינה", 4: "הבחירה נקלטה",
+            5: "העוזר אינו זמין", 6: "תפריט כלי AI", 7: "התחלת כלי", 8: "סיום כלי",
+            9: "תפריט חיפוש", 10: "החיפוש מתבצע", 11: "לא נמצאו תוצאות",
+            12: "אזור אישי", 13: "היסטוריה", 14: "העדפות", 15: "תפריט ניהול",
+            16: "ניהול משתמשים", 17: "ניהול API", 18: "סטטיסטיקות", 19: "שגיאות",
+            20: "ניהול כלים", 21: "נא להמתין", 22: "הודעת שגיאה", 23: "לא זמין",
+            24: "חזרה", 25: "תפריט ראשי נוסף", 26: "סיום שיחה", 27: "בחירה לא תקינה",
+            28: "עצירה", 29: "המשך", 30: "ניווט", 31: "פורום קולי",
+            32: "הקלטה לפורום", 33: "תפריט מדיה", 34: "הסכת", 35: "בדיקה יומית",
+            36: "הבדיקה הצליחה", 37: "הבדיקה נכשלה"
+        }
+        def audio_item(r):
+            match = re.match(r"^(\\d{2})-", str(r[0]))
+            number = int(match.group(1)) if match else None
+            label = audio_labels.get(number) if number is not None else None
+            if not label:
+                label = "לא זוהתה הודעה" if number is not None and number <= 40 else "קובץ ללא שיוך"
+            return {"filename": r[0], "catalog_label": label,
+                    "size_bytes": int(r[1]), "created_at": r[2].isoformat()}
+        return jsonify({"items": [audio_item(r) for r in rows]})
     except Exception as e:
         print("admin audio list failed:", redact(e), flush=True)
         return jsonify({"error": "טעינת קובצי השמע נכשלה"}), 500
