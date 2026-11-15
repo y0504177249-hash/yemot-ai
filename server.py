@@ -187,6 +187,7 @@ START_TIME = time.time()
 _store = {"settings": {}, "callers": {}, "loaded": 0.0, "source": "env", "error": "", "refreshing": False}
 _store_lock = threading.Lock()
 events = collections.deque(maxlen=100)
+_forum_memory = collections.deque(maxlen=50)
 
 
 def settings_defaults():
@@ -296,9 +297,15 @@ def system_prompt():
                 "file": "המשתמש בחר קריאת קבצים באמצעות AI. חפש תחילה מיילים עם קובץ מצורף באמצעות mail={\"action\":\"search\",\"query\":\"has:attachment\"}. לאחר בחירת מייל, השתמש ב-mail={\"action\":\"read_attachment\",\"index\":1,\"attachment_index\":1}. סכם בעברית את הקובץ לפי בקשת המשתמש. אם אין גישה למייל או לקובץ, אמור זאת במפורש.",
                 "writing": "המשתמש בחר כתיבה וניסוח. עזור בכתיבת טקסטים, עריכה וניסוח לפי המטרה והטון שביקש.",
                 "research": "המשתמש בחר חיפוש ומחקר. השתמש בכלי lookup הקיים כשנדרש מידע עובדתי או עדכני.",
-                "planning": "המשתמש בחר תכנון וחישובים. בצע תכנון וחישובים בזהירות והצג את התוצאה בצורה קצרה המתאימה להקראה."
+                "planning": "המשתמש בחר תכנון וחישובים. בצע תכנון וחישובים בזהירות והצג את התוצאה בצורה קצרה המתאימה להקראה.",
+                "utility_weather": "המשתמש בחר בדיקת מזג אוויר. בקש עיר אם לא צוינה, השתמש בחיפוש עדכני, וציין את מועד המידע.",
+                "utility_calculator": "המשתמש בחר מחשבון. חשב בזהירות, בדוק את התוצאה פעם נוספת והקרא אותה בקצרה.",
+                "utility_conversion": "המשתמש בחר המרת יחידות או מטבע. הבהר יחידות ומטבעות, ובשערי מטבע השתמש במידע עדכני.",
+                "utility_translation": "המשתמש בחר תרגום. תרגם נאמנה לשפה שהתבקשה ושמור על המשמעות והטון.",
+                "utility_research": "המשתמש בחר חיפוש מהיר. השתמש בחיפוש כאשר נדרש מידע עובדתי או עדכני, וענה בתמצית."
             }
             text += " " + action_prompts.get(tool_action, "")
+        text += ' אם המשתמש אומר במפורש "חזרה לתפריט" או "תפריט ראשי", הוסף ל-JSON את השדה return_to_menu=true וענה בקצרה שחוזרים לתפריט.'
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
         _prompt_cache[key] = text
@@ -517,6 +524,13 @@ def db_init(conn):
                 resolved_at TIMESTAMPTZ)""")
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS admin_notifications_open_unique
                 ON admin_notifications(kind, phone) WHERE resolved_at IS NULL""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS voice_forum_posts (
+                id BIGSERIAL PRIMARY KEY,
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT 'משתמש',
+                audio_path TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            cur.execute("CREATE INDEX IF NOT EXISTS voice_forum_posts_created_idx ON voice_forum_posts(created_at DESC)")
     db_ensure_profile_columns(conn)
     conn.commit()
 
@@ -1733,11 +1747,14 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         print("action error:", redact(e), flush=True)
         answer = "לא הצלחתי לבצע את הפעולה"
 
-    if return_to_menu and assistant_mode == "tools":
+    if return_to_menu:
         with lock:
             st = calls.get(call_id)
             if st is not None:
-                st["return_tools_menu"] = True
+                if st.get("main_menu"):
+                    st["return_main_menu"] = True
+                elif assistant_mode == "tools":
+                    st["return_tools_menu"] = True
 
     if heard:  # שומרים בהיסטוריה רק טקסט, כדי לשמור על מהירות
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
@@ -2006,6 +2023,333 @@ def tools_area(st, p, call_id, phone, recorded, use_yiddish):
     return _digits(st, tools_menu_text())
 
 
+MAIN_ASSISTANT_OPTIONS = {
+    "1": ("smart", "הבינה החכמה"),
+    "2": ("edgy", "הבינה הישירה"),
+    "3": ("psychologist", "הבינה לשיחה והקשבה"),
+    "4": ("yeshiva", "בינת הישיבה"),
+    "5": ("yiddish", "הבינה ביידיש"),
+    "6": ("astrology", "מפת האישיות"),
+}
+
+
+def main_menu_text(message=""):
+    prefix = (message + ". ") if message else ""
+    return (
+        prefix + "ברוכים הבאים למערכת הבינה. "
+        "לתפריט כל סוגי הבינות הקש אחת. "
+        "לכלי איי איי הקש שתיים. "
+        "לכלים שימושיים הקש שלוש. "
+        "לאזור האישי ולניהול הקש ארבע. "
+        "לפורום הקולי בעיוות קול הקש חמש. "
+        "לשמיעת התפריט מחדש הקש תשע."
+    )
+
+
+def assistants_menu_text(message=""):
+    prefix = (message + ". ") if message else ""
+    return (
+        prefix + "תפריט סוגי הבינות. "
+        "לבינה החכמה הקש אחת. לבינה הישירה הקש שתיים. "
+        "לבינה לשיחה והקשבה הקש שלוש. לבינת הישיבה הקש ארבע. "
+        "לבינה ביידיש הקש חמש. למפת האישיות הקש שש. "
+        "לחזרה לתפריט הראשי הקש אפס."
+    )
+
+
+def main_menu_area(st, p, call_id, phone, recorded):
+    if st.get("awaiting"):
+        st["awaiting"] = False
+        val = (p.get(st.get("field", "")) or "").strip()
+        stage = st.get("menu_stage", "root")
+        if stage == "root":
+            if val == "1":
+                st["menu_stage"] = "assistants"
+                return _digits(st, assistants_menu_text())
+            if val == "2":
+                st["menu_stage"] = "tools"
+                st["tools_chat"] = False
+                st["tools_busy"] = False
+                st.pop("tools_action", None)
+                return _digits(st, tools_menu_text())
+            if val == "3":
+                st["menu_stage"] = "utilities"
+                return _digits(st, utilities_menu_text())
+            if val == "4":
+                st["menu_stage"] = "personal"
+                st["pa_mode"] = "code" if admin_phone_ok(phone) else "menu"
+                st["is_admin"] = False
+                return phone_area(st, p, call_id, phone, recorded)
+            if val == "5":
+                st["menu_stage"] = "forum"
+                st["forum_stage"] = "menu"
+                return _digits(st, forum_menu_text())
+            if val in ("0", "9", ""):
+                return _digits(st, main_menu_text())
+            return _digits(st, main_menu_text("לא זיהיתי את הבחירה"))
+        if stage == "assistants":
+            if val in ("0", "9", ""):
+                st["menu_stage"] = "root"
+                return _digits(st, main_menu_text())
+            selected = MAIN_ASSISTANT_OPTIONS.get(val)
+            if not selected:
+                return _digits(st, assistants_menu_text("לא זיהיתי את הבחירה"))
+            mode, label = selected
+            st["selected_assistant_mode"] = mode
+            st["menu_stage"] = "assistant_chat"
+            st["status"] = "idle"
+            st["last"] = None
+            st["tools_chat"] = False
+            st.pop("tools_action", None)
+            st["turn"] += 1
+            prompt = "בחרת " + label + ". אמור את בקשתך. כדי לחזור לתפריט הראשי אמור חזרה לתפריט."
+            if mode == "yiddish":
+                prompt = "האסט אויסגעקליבן די יידישע בינה. זאג דיין בקשה אויף יידיש. צו צוריקגיין צום הויפט מעניו זאג צוריק צום מעניו."
+            return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
+    stage = st.get("menu_stage", "root")
+    return _digits(st, assistants_menu_text() if stage == "assistants" else main_menu_text())
+
+
+def utilities_menu_text(message=""):
+    prefix = (message + ". ") if message else ""
+    return (
+        prefix + "תפריט כלים שימושיים. "
+        "לבדיקת מזג אוויר הקש אחת. לחישוב הקש שתיים. "
+        "להמרת יחידות ומטבעות הקש שלוש. לתרגום הקש ארבע. "
+        "לחיפוש מהיר הקש חמש. לחזרה לתפריט הראשי הקש אפס."
+    )
+
+
+UTILITY_ACTIONS = {
+    "1": ("utility_weather", "בדיקת מזג אוויר", "אמור באיזו עיר לבדוק את מזג האוויר או שאל שאלה על מזג האוויר."),
+    "2": ("utility_calculator", "מחשבון", "אמור את התרגיל או החישוב שברצונך לבצע."),
+    "3": ("utility_conversion", "המרת יחידות ומטבעות", "אמור מה להמיר, מאיזו יחידה או מטבע ולאיזו יחידה או מטבע."),
+    "4": ("utility_translation", "תרגום", "אמור את הטקסט ואת שפת היעד לתרגום."),
+    "5": ("utility_research", "חיפוש מהיר", "אמור מה תרצה לחפש ולבדוק."),
+}
+
+
+def utilities_area(st, p, call_id):
+    if st.get("awaiting"):
+        st["awaiting"] = False
+        val = (p.get(st.get("field", "")) or "").strip()
+        if val in ("0", "9", ""):
+            st["menu_stage"] = "root"
+            return _digits(st, main_menu_text())
+        selected = UTILITY_ACTIONS.get(val)
+        if not selected:
+            return _digits(st, utilities_menu_text("לא זיהיתי את הבחירה"))
+        action, label, prompt = selected
+        st["menu_stage"] = "utility_chat"
+        st["tools_chat"] = True
+        st["tools_action"] = action
+        st["last"] = None
+        st["status"] = "idle"
+        st["turn"] += 1
+        return Response(read_command("בחרת " + label + ". " + prompt + " כדי לחזור לתפריט הראשי אמור חזרה לתפריט.", call_id, st["turn"]), mimetype="text/plain")
+    return _digits(st, utilities_menu_text())
+
+
+def forum_menu_text(message=""):
+    prefix = (message + ". ") if message else ""
+    return (
+        prefix + "הפורום הקולי בעיוות קול. "
+        "להאזנה להודעות האחרונות הקש אחת. לפרסום הודעה קולית חדשה הקש שתיים. "
+        "לחזרה לתפריט הראשי הקש אפס."
+    )
+
+
+def forum_distort_voice(raw_audio):
+    """Change playback pitch so the original speaker is less recognizable."""
+    source = io.BytesIO(raw_audio)
+    output = io.BytesIO()
+    with wave.open(source, "rb") as inp:
+        channels = inp.getnchannels()
+        sample_width = inp.getsampwidth()
+        frame_rate = inp.getframerate()
+        frames = inp.readframes(inp.getnframes())
+    if sample_width != 2 or channels not in (1, 2) or not frame_rate:
+        raise ValueError("פורמט ההקלטה אינו נתמך לעיוות קול")
+    # Lower playback sample rate: recognizable speech remains intelligible, with a lower altered voice.
+    changed_rate = max(6000, int(frame_rate * 0.78))
+    with wave.open(output, "wb") as out:
+        out.setnchannels(channels)
+        out.setsampwidth(sample_width)
+        out.setframerate(changed_rate)
+        out.writeframes(frames)
+    return output.getvalue()
+
+
+def forum_upload_audio(raw_audio, call_id):
+    token = f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}"
+    folder = "/forum"
+    try:
+        requests.get(
+            "https://www.call2all.co.il/ym/api/Ym_MakeDir",
+            params={"token": token, "path": "ivr2:" + folder},
+            timeout=12,
+        )
+    except Exception:
+        pass
+    suffix = re.sub(r"[^0-9A-Za-z]", "", str(call_id))[:16] or "call"
+    filename = "post" + str(time.time_ns()) + suffix
+    response = requests.post(
+        "https://www.call2all.co.il/ym/api/UploadFile",
+        data={"token": token, "path": "ivr2:" + folder + "/" + filename + ".wav", "convertAudio": "1"},
+        files={"file": (filename + ".wav", raw_audio, "audio/wav")},
+        timeout=40,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if result.get("responseStatus") != "OK":
+        raise RuntimeError(result.get("message", "forum upload failed"))
+    return folder + "/" + filename
+
+
+def forum_save_post(phone, audio_path):
+    display_name = (caller(phone).get("name") or "משתמש")[:50]
+    record = {
+        "id": int(time.time() * 1000),
+        "phone": phone,
+        "name": display_name,
+        "audio_path": audio_path,
+        "created_at": time.strftime("%d/%m %H:%M"),
+    }
+    conn = db_connect()
+    if conn is None:
+        _forum_memory.appendleft(record)
+        return record
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO voice_forum_posts (phone, display_name, audio_path) VALUES (%s, %s, %s) RETURNING id, created_at",
+                    (phone[:30], display_name, audio_path),
+                )
+                row = cur.fetchone()
+        record["id"] = row[0]
+        record["created_at"] = row[1].strftime("%d/%m %H:%M")
+        return record
+    except Exception as e:
+        print("forum post save failed:", redact(e)[:160], flush=True)
+        _forum_memory.appendleft(record)
+        return record
+    finally:
+        conn.close()
+
+
+def forum_recent_posts(limit=8):
+    conn = db_connect()
+    if conn is None:
+        return list(_forum_memory)[:limit]
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, display_name, audio_path, created_at FROM voice_forum_posts ORDER BY created_at DESC, id DESC LIMIT %s",
+                (max(1, min(int(limit), 8)),),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+        return [
+            {"id": row[0], "name": row[1] or "משתמש", "audio_path": row[2],
+             "created_at": row[3].strftime("%d/%m %H:%M")}
+            for row in rows
+        ]
+    except Exception as e:
+        print("forum list failed:", redact(e)[:160], flush=True)
+        return list(_forum_memory)[:limit]
+    finally:
+        conn.close()
+
+
+def forum_worker(call_id, recorded, phone):
+    state = calls.get(call_id)
+    _tls.phone = phone
+    _tls.record_path = _tls.extension_path = (state or {}).get("ext_path") or "/8"
+    try:
+        original = download_recording(recorded)
+        altered = forum_distort_voice(original)
+        audio_path = forum_upload_audio(altered, call_id)
+        forum_save_post(phone, audio_path)
+        message = "ההודעה פורסמה בפורום"
+        ok = True
+    except Exception as e:
+        print("forum audio failed:", redact(e)[:180], flush=True)
+        message = "לא הצלחתי לפרסם את ההודעה. נסה להקליט שוב"
+        ok = False
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["forum_result"] = message
+            st["forum_ok"] = ok
+            st["status"] = "done"
+
+
+def forum_area(st, p, call_id, phone, recorded):
+    if st.get("forum_busy"):
+        if st.get("status") == "processing":
+            return Response(wait_command(), mimetype="text/plain")
+        if st.get("status") == "done":
+            message = st.pop("forum_result", "הפעולה הסתיימה")
+            st["forum_busy"] = False
+            st["status"] = "idle"
+            st["forum_recording"] = False
+            st["last"] = None
+            return _digits(st, forum_menu_text(message))
+
+    if st.get("forum_recording"):
+        if recorded and recorded != st.get("last"):
+            st["last"] = recorded
+            st["forum_recording"] = False
+            st["forum_busy"] = True
+            st["status"] = "processing"
+            st["started"] = time.time()
+            threading.Thread(target=forum_worker, args=(call_id, recorded, phone), daemon=True).start()
+            return Response(wait_command(), mimetype="text/plain")
+        return Response(read_command("אמור את ההודעה לפורום ובסיום הקש סולמית.", call_id, st["turn"]), mimetype="text/plain")
+
+    if st.get("awaiting"):
+        st["awaiting"] = False
+        val = (p.get(st.get("field", "")) or "").strip()
+        stage = st.get("forum_stage", "menu")
+        if stage == "menu":
+            if val in ("0", "9", ""):
+                st["menu_stage"] = "root"
+                return _digits(st, main_menu_text())
+            if val == "1":
+                posts = forum_recent_posts()
+                if not posts:
+                    return _digits(st, forum_menu_text("אין עדיין הודעות בפורום"))
+                st["forum_posts"] = posts
+                st["forum_stage"] = "pick"
+                options = " ".join(
+                    f"{i + 1}. {clean_for_tts(post['name'])} {post['created_at']}"
+                    for i, post in enumerate(posts)
+                )
+                return _digits(st, "ההודעות האחרונות בפורום. " + options + ". להאזנה להודעה הקש את המספר שלה. לחזרה הקש אפס")
+            if val == "2":
+                st["forum_stage"] = "menu"
+                st["forum_recording"] = True
+                st["last"] = None
+                st["turn"] += 1
+                return Response(read_command("אמור את ההודעה לפורום ובסיום הקש סולמית.", call_id, st["turn"]), mimetype="text/plain")
+            return _digits(st, forum_menu_text("לא זיהיתי את הבחירה"))
+        if stage == "pick":
+            if val in ("0", "9", ""):
+                st["forum_stage"] = "menu"
+                return _digits(st, forum_menu_text())
+            posts = st.get("forum_posts") or []
+            if val.isdigit() and 1 <= int(val) <= len(posts):
+                post = posts[int(val) - 1]
+                st["forum_stage"] = "menu"
+                return Response(
+                    f"id_list_message=f-{post['audio_path']}&go_to_folder={active_extension_path()}",
+                    mimetype="text/plain",
+                )
+            return _digits(st, "הבחירה אינה תקינה. " + forum_menu_text())
+    return _digits(st, forum_menu_text())
+
+
 def personal_menu_text(phone, message=""):
     prefix = (message + ". ") if message else ""
     name = caller(phone).get("name", "")
@@ -2014,7 +2358,7 @@ def personal_menu_text(phone, message=""):
             "להפעלה או כיבוי של שמירת היסטוריית השיחות הקש 4. לשמיעת השיחה האחרונה שלך הקש 5. ")
     if admin_phone_ok(phone):
         text += "לניהול המערכת הקש 9. "
-    return text + "לשמיעה חוזרת הקש 0."
+    return text + ("לחזרה לתפריט הראשי הקש 0." if calls.get(getattr(_tls, "call_id", ""), {}).get("main_menu") else "לשמיעה חוזרת הקש 0.")
 
 
 def profile_text(phone):
@@ -2113,6 +2457,10 @@ def _pa_show(st, mode, phone):
 
 def _pa_handle(st, mode, val, call_id, phone):
     if mode == "menu":
+        if val == "0" and st.get("main_menu"):
+            st["menu_stage"] = "root"
+            st["pa_mode"] = "menu"
+            return _digits(st, main_menu_text())
         msg = ""
         if val == "1":
             msg = profile_text(phone)
@@ -2197,6 +2545,10 @@ def _pa_handle(st, mode, val, call_id, phone):
             st["pa_mode"] = "unblock"
             return _digits(st, "הקש את מספר הטלפון שברצונך לפתוח מחסימה", 15, 9)
         elif val in ("0", ""):
+            if st.get("main_menu"):
+                st["menu_stage"] = "root"
+                st["pa_mode"] = "menu"
+                return _digits(st, main_menu_text())
             st["pa_mode"] = "menu"
             return _digits(st, personal_menu_text(phone))
         else:
@@ -2231,7 +2583,7 @@ def ivr():
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
-    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "personal"}
+    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "personal", "menu"}
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
     api_ext = re.sub(r"[^0-9/]", "", str(p.get("ApiExtension", ""))).strip("/")
@@ -2241,6 +2593,8 @@ def ivr():
     maybe_refresh()
     db_load_caller(phone)
     assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if use_yiddish else "smart"))
+    if requested_mode == "menu" or (not requested_mode and api_ext in ("", "8", "1/1")):
+        assistant_mode = "menu"
 
     if p.get("hangup") == "yes":
         with lock:
@@ -2319,6 +2673,43 @@ def ivr():
         st.setdefault("opening_greeting", greeting)
         st["t"] = time.time()
 
+        main_menu_active = bool(st.get("main_menu") or assistant_mode == "menu")
+        if main_menu_active:
+            st["main_menu"] = True
+            if st.get("return_main_menu") and st.get("status") == "done":
+                st["return_main_menu"] = False
+                st["menu_stage"] = "root"
+                st["tools_chat"] = False
+                st["tools_busy"] = False
+                st["tools_recording"] = False
+                st["status"] = "idle"
+                st.pop("tools_action", None)
+                st.pop("utility_action", None)
+                st["turn"] += 1
+                return _digits(st, main_menu_text())
+            menu_stage = st.get("menu_stage", "root")
+            if menu_stage in ("root", "assistants"):
+                return main_menu_area(st, p, call_id, phone, recorded)
+            if menu_stage == "tools":
+                assistant_mode = "tools"
+            elif menu_stage == "utilities":
+                return utilities_area(st, p, call_id)
+            elif menu_stage == "utility_chat":
+                assistant_mode = "tools"
+                st["tools_chat"] = True
+            elif menu_stage == "personal":
+                assistant_mode = "personal"
+            elif menu_stage == "forum":
+                return forum_area(st, p, call_id, phone, recorded)
+            elif menu_stage == "assistant_chat":
+                assistant_mode = st.get("selected_assistant_mode") or "smart"
+                if assistant_mode == "yiddish":
+                    use_yiddish = True
+                    _tls.yiddish = True
+            else:
+                st["menu_stage"] = "root"
+                return _digits(st, main_menu_text())
+
         if assistant_mode == "personal":
             return phone_area(st, p, call_id, phone, recorded)
 
@@ -2354,6 +2745,12 @@ def ivr():
 
         if assistant_mode == "tools" and st.get("tools_chat") and st.get("return_tools_menu") and st.get("status") == "done":
             st["return_tools_menu"] = False
+            if st.get("main_menu"):
+                st["return_main_menu"] = True
+                st["status"] = "idle"
+                st["menu_stage"] = "root"
+                st["turn"] += 1
+                return _digits(st, main_menu_text())
             st["tools_chat"] = False
             st["status"] = "idle"
             st["turn"] += 1
@@ -2370,7 +2767,12 @@ def ivr():
             st["last"] = recorded
             st["status"] = "processing"
             st["started"] = time.time()
-            threading.Thread(target=worker, args=(call_id, recorded, phone, use_yiddish, assistant_mode), daemon=True).start()
+            threading.Thread(
+                target=worker,
+                args=(call_id, recorded, phone, use_yiddish or assistant_mode == "yiddish",
+                      assistant_mode, st.get("tools_action")),
+                daemon=True,
+            ).start()
             return Response(wait_command(), mimetype="text/plain")
 
         # עיבוד בעיצומו: פעולות יצירה עשויות לדרוש יותר זמן מהתשובה הקולית הרגילה.
