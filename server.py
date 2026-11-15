@@ -21,6 +21,7 @@ from flask import Flask, request, Response, session, jsonify, send_file
 from google import genai
 from google.genai import types
 from cryptography.fernet import Fernet
+from assistants import get_prompt as get_assistant_prompt
 try:
     from google.oauth2 import id_token as google_id_token
     from google.auth.transport import requests as google_auth_requests
@@ -238,40 +239,10 @@ def system_prompt():
     tools_allowed = profile.get("tools_enabled", True) is not False
     key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode, tools_allowed)
     if key not in _prompt_cache:
-        mode_prompts = {
-            "smart": "סגנון רודי חכם: היה חד, מועיל, סקרן, מדויק וענייני. הסבר בפשטות והתאם את התשובה למשתמש.",
-            "edgy": "סגנון רודי עוקצן: השתמש בהומור חד, עקיצות קלילות ושנינות, אך אל תשפיל, תאיים או תפגע בקבוצות או באנשים באופן אכזרי.",
-            "psychologist": "סגנון פסיכולוגית: הקשיבי באמפתיה, שאלי שאלות פתוחות, שיקפי רגשות והציעי צעד קטן. אינך פסיכולוגית מוסמכת, אל תאבחני ואל תחליפי טיפול מקצועי.",
-            "yeshiva": ("זיי א קלוגער ראש ישיבה: רעד מיט חכמה, רואיגקייט און דרך ארץ. דערקלער א זאך מיט א קורצן משל אדער א פשוטער מעשה ווען עס העלפט, און געב א קליינעם מעשיות'דיגן שריט. מאך נישט קיין פאבריצירטע ציטאטן אדער מקורות." if yiddish_mode() else "סגנון ראש ישיבה: דבר בחכמה, בנחת ובבהירות, עם משל קצר ומסר מעשי כשמתאים. אל תמציא ציטוטים או מקורות."),
-            "yiddish": "סגנון משפיע באידיש: ענה ביידיש טבעית, חמה וישיבתית בלבד, בלי אנגלית ובלי לעז.",
-            "tools": (
-                "אתה מרכז כלי AI קולי. בתחילת שיחה הצג תפריט קצר והצע למשתמש לבחור: "
-                "מיילים (הקראת הודעות, חיפוש, סיכום, ניסוח ושליחה בכפוף לחיבור ולהרשאה), "
-                "צ'אט חופשי עם AI, כתיבה וניסוח, תרגום, סיכום מסמכים, חיפוש מידע, "
-                "לימוד והסברים, תכנון משימות וחישובים. "
-                "אם המשתמש בוחר מיילים, ברר אם הוא רוצה לקרוא/לחפש הודעה או לנסח/לשלוח. "
-                "לעולם אל תטען שקראת תיבה או שלחת הודעה אם פעולת השרת לא אישרה זאת. "
-                "לפני שליחת מייל יש להשתמש בתהליך האישור המובנה בלבד. "
-                "אם אין חיבור לתיבה, אמור זאת והצע ניסוח מייל שהמשתמש יוכל להעתיק. "
-                "בצ'אט חופשי נהל שיחה טבעית, זכור את ההקשר בשיחה הנוכחית וענה בקצרה."
-            ),
-            "astrology": (
-                "אתה אסטרולוג ומפרש מפת אישיות בסגנון חם, מעמיק, רגיש ומכבד. "
-                "בתחילת השיחה בקש שם פרטי ותאריך לידה מלא: יום, חודש ושנה. "
-                "אם חסר פרט, שאל רק על הפרט החסר, אחד בכל פעם. אל תבקש מספר זהות או פרטים מזהים נוספים. "
-                "לאחר קבלת הפרטים, צור קריאה ארוכה ומעמיקה הכוללת מזל שמש לפי התאריך, "
-                "נטיות אופי, חוזקות, נקודות רגישות, דפוסי חשיבה ותקשורת, קשרים וזוגיות, "
-                "עבודה וכישרונות, מניעים פנימיים, אתגרים, צמיחה אישית והמלצות להתבוננות. "
-                "שלב את השם הפרטי בטון אישי אך אל תטען שהשם או תאריך הלידה מוכיחים עובדות על האדם. "
-                "הבהר בעדינות שזו פרשנות אסטרולוגית/רוחנית לצורכי עניין והתבוננות, לא אבחון מדעי או תחזית ודאית. "
-                "אל תמציא מיקום כוכבים, ירח, אופק או בתים אסטרולוגיים; ללא שעת ועיר לידה אין לחשב אותם. "
-                "אל תציג ייעוץ רפואי, משפטי או כלכלי כנגזר מהמפה."
-            )
-        }
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
         if tools_allowed:
             text += LOOKUP_PROMPT
-        text += " " + mode_prompts.get(selected_mode, mode_prompts["smart"])
+        text += " " + get_assistant_prompt(selected_mode, yiddish=yiddish_mode())
         if voice_on():
             text += VOICE_PROMPT
         if EMAIL_ENABLED:
@@ -657,18 +628,29 @@ def db_load_caller(phone):
         conn.close()
 
 
-def db_load_history(phone):
+def db_ensure_transcript_columns(conn):
+    """Add assistant separation without deleting or rewriting existing transcripts."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE call_transcripts ADD COLUMN IF NOT EXISTS assistant_mode TEXT NOT NULL DEFAULT 'smart'")
+
+
+def db_load_history(phone, assistant_mode="smart"):
+    if caller(phone).get("history_enabled", True) is False:
+        return []
     conn = db_connect()
     if conn is None:
         return []
     try:
         with conn.cursor() as cur:
+            db_ensure_transcript_columns(conn)
             cur.execute(
                 """SELECT heard, answer FROM call_transcripts
-                   WHERE phone = %s ORDER BY created_at DESC, id DESC LIMIT 6""",
-                (phone,),
+                   WHERE phone = %s AND assistant_mode = %s
+                   ORDER BY created_at DESC, id DESC LIMIT 6""",
+                (phone, assistant_mode),
             )
             rows = cur.fetchall()
+        conn.commit()
         return list(reversed(rows))
     except Exception as e:
         print("database history load failed:", redact(e), flush=True)
@@ -677,8 +659,8 @@ def db_load_history(phone):
         conn.close()
 
 
-def db_save_transcript(call_id, phone, heard, answer):
-    if not DATABASE_URL or not phone or not heard:
+def db_save_transcript(call_id, phone, heard, answer, assistant_mode="smart"):
+    if not DATABASE_URL or not phone or not heard or caller(phone).get("history_enabled", True) is False:
         return False
     conn = db_connect()
     if conn is None:
@@ -687,12 +669,13 @@ def db_save_transcript(call_id, phone, heard, answer):
         profile = caller(phone)
         with conn:
             with conn.cursor() as cur:
+                db_ensure_transcript_columns(conn)
                 cur.execute(
                     """INSERT INTO call_transcripts
-                       (call_id, phone, caller_name, heard, answer)
-                       VALUES (%s, %s, %s, %s, %s)""",
+                       (call_id, phone, caller_name, heard, answer, assistant_mode)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
                     (str(call_id)[:200], phone[:30], profile.get("name", "")[:40],
-                     heard[:5000], answer[:5000]),
+                     heard[:5000], answer[:5000], assistant_mode[:40]),
                 )
         return True
     except Exception as e:
@@ -700,6 +683,52 @@ def db_save_transcript(call_id, phone, heard, answer):
         return False
     finally:
         conn.close()
+
+
+def yemot_history_folder(assistant_mode):
+    mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"} else "smart"
+    base = "/1/1" if getattr(_tls, "yiddish", False) else "/8"
+    phone = re.sub(r"[^0-9]", "", str(getattr(_tls, "phone", "") or ""))[:15]
+    return f"{base}/history/{mode}/{phone}"
+
+
+def archive_yemot_history(phone, assistant_mode, call_id, heard, answer):
+    """Write one UTF-8 transcript file to a per-assistant/per-caller Yemot folder."""
+    try:
+        mode = assistant_mode if assistant_mode in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"} else "smart"
+        base = "/1/1" if getattr(_tls, "yiddish", False) else "/8"
+        clean_phone = re.sub(r"[^0-9]", "", str(phone or ""))[:15]
+        if not clean_phone:
+            return False
+        folder = f"{base}/history/{mode}/{clean_phone}"
+        token = f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}"
+        # Create each level explicitly; Ym_MakeDir is idempotent for existing folders.
+        for part_count in range(1, len(folder.strip("/").split("/")) + 1):
+            partial = "/" + "/".join(folder.strip("/").split("/")[:part_count])
+            try:
+                requests.get("https://www.call2all.co.il/ym/api/Ym_MakeDir",
+                             params={"token": token, "path": "ivr2:" + partial}, timeout=12)
+            except Exception:
+                pass
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        safe_call = re.sub(r"[^0-9A-Za-z_-]", "", str(call_id))[:24] or "call"
+        filename = f"{stamp}-{int(time.time() * 1000) % 1000000:06d}-{safe_call}.txt"
+        content = (f"assistant: {mode}\\nphone: {clean_phone}\\ncall: {safe_call}\\n\\n"
+                   f"מתקשר: {heard[:5000]}\\nעוזר: {answer[:5000]}\\n")
+        response = requests.post(
+            "https://www.call2all.co.il/ym/api/UploadFile",
+            data={"token": token, "path": "ivr2:" + folder + "/" + filename, "convertAudio": "0"},
+            files={"file": (filename, content.encode("utf-8"), "text/plain; charset=utf-8")},
+            timeout=25,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("responseStatus") != "OK":
+            raise RuntimeError(result.get("message", result.get("responseStatus", "Yemot upload failed")))
+        return True
+    except Exception as e:
+        print("Yemot transcript archive failed:", redact(e)[:180], flush=True)
+        return False
 
 
 def db_admin_recent_transcripts(limit=5):
@@ -1280,8 +1309,10 @@ def do_lookup(lookup, heard):
 
 def ask_gemini(call_id, audio_bytes, phone=""):
     history = histories.setdefault(call_id, [])
-    if phone and call_id not in _history_loaded:
-        for heard_old, answer_old in db_load_history(phone):
+    assistant_mode = getattr(_tls, "assistant_mode", "smart")
+    history_enabled = caller(phone).get("history_enabled", True) is not False
+    if phone and history_enabled and call_id not in _history_loaded:
+        for heard_old, answer_old in db_load_history(phone, assistant_mode):
             if heard_old:
                 history.append(types.Content(role="user", parts=[types.Part(text=heard_old)]))
                 history.append(types.Content(role="model", parts=[types.Part(text=answer_old)]))
@@ -1339,8 +1370,11 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
         history.append(types.Content(role="model", parts=[types.Part(text=answer)]))
         history[:] = history[-12:]
-        if phone:
-            db_save_transcript(call_id, phone, heard, answer)
+        if phone and history_enabled:
+            db_save_transcript(call_id, phone, heard, answer, assistant_mode)
+            threading.Thread(target=archive_yemot_history,
+                             args=(phone, assistant_mode, call_id, heard, answer),
+                             daemon=True).start()
     return answer, change_voice
 
 
@@ -1467,7 +1501,7 @@ def ivr():
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
     allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}
-    assistant_mode = requested_mode if requested_mode in allowed_modes else ("yiddish" if requested_lang in ("yi", "yiddish", "1") else "smart")
+    assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if requested_lang in ("yi", "yiddish", "1") else "smart"))
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
     _tls.record_path = "/1/1" if use_yiddish else "/8"
@@ -1497,7 +1531,7 @@ def ivr():
 
     # Load caller history once at the start of each new call, outside the global lock.
     is_new_call = call_id not in calls
-    previous_turns = db_load_history(phone) if is_new_call and phone else []
+    previous_turns = db_load_history(phone, assistant_mode) if is_new_call and phone else []
     previous_topic = previous_turns[-1][0].strip() if previous_turns else ""
 
     with lock:
@@ -2356,6 +2390,7 @@ def admin_transcripts():
     name = request.args.get("name", "").strip()[:40]
     date_from = request.args.get("from", "").strip()
     date_to = request.args.get("to", "").strip()
+    assistant_mode_filter = request.args.get("assistant_mode", "").strip()
     try:
         limit = min(1000, max(1, int(request.args.get("limit", "500"))))
     except ValueError:
@@ -2373,10 +2408,12 @@ def admin_transcripts():
             clauses.append("created_at >= %s::date"); params.append(date_from)
         if date_to:
             clauses.append("created_at < (%s::date + interval '1 day')"); params.append(date_to)
+        if assistant_mode_filter in {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}:
+            clauses.append("assistant_mode = %s"); params.append(assistant_mode_filter)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, call_id, phone, caller_name, created_at, heard, answer FROM call_transcripts"
+                "SELECT id, call_id, phone, caller_name, created_at, heard, answer, assistant_mode FROM call_transcripts"
                 + where + " ORDER BY created_at DESC LIMIT %s",
                 params + [limit],
             )
