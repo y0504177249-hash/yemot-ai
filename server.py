@@ -2594,7 +2594,7 @@ def ivr():
     maybe_refresh()
     db_load_caller(phone)
     assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if use_yiddish else "smart"))
-    if requested_mode == "menu" or (not requested_mode and api_ext in ("", "8", "1/1")):
+    if requested_mode == "menu" or (api_ext in ("", "8", "1/1") and requested_mode != "personal"):
         assistant_mode = "menu"
 
     if p.get("hangup") == "yes":
