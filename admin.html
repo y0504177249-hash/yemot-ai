@@ -286,7 +286,8 @@
           ['psychologist', '3. פסיכולוגית'],
           ['yeshiva', '4. בסגנון ראש ישיבה'],
           ['yiddish', '5. משפיע באידיש'],
-          ['tools', '6. כלי AI']
+          ['tools', '6. כלי AI'],
+          ['central', '7. עוזר AI מרכזי']
         ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
       );
       var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
@@ -488,8 +489,8 @@
           } }, 'מחיקה');
           rows.append(h('article', { class: 'line' },
             h('div', null,
-              h('strong', null, item.filename),
-              h('div', { class: 'sub' }, (item.size_bytes / 1024).toFixed(1) + ' KB · ' + new Date(item.created_at).toLocaleString('he-IL')),
+              h('strong', null, item.catalog_label || item.filename),
+              h('div', { class: 'sub' }, item.filename + ' · ' + (item.size_bytes / 1024).toFixed(1) + ' KB · ' + new Date(item.created_at).toLocaleString('he-IL')),
               player),
             del));
         });
@@ -527,6 +528,22 @@
     var name = h('input', { type: 'text', placeholder: 'שם מתקשר' });
     var from = h('input', { type: 'date', 'aria-label': 'מתאריך' });
     var to = h('input', { type: 'date', 'aria-label': 'עד תאריך' });
+    var mode = h('select', null, [
+      ['', 'כל סוגי העוזרים'],
+      ['central', 'העוזר המרכזי'],
+      ['smart', 'הבינה החכמה'],
+      ['edgy', 'הבינה הישירה'],
+      ['psychologist', 'שיחה והקשבה'],
+      ['yeshiva', 'בינת הישיבה'],
+      ['yiddish', 'ביידיש'],
+      ['tools', 'כלי AI'],
+      ['astrology', 'מפת האישיות']
+    ].map(function (item) { return h('option', { value: item[0] }, item[1]); }));
+    var modeLabels = {
+      central: 'העוזר המרכזי', smart: 'הבינה החכמה', edgy: 'הבינה הישירה',
+      psychologist: 'שיחה והקשבה', yeshiva: 'בינת הישיבה', yiddish: 'ביידיש',
+      tools: 'כלי AI', astrology: 'מפת האישיות'
+    };
     var results = h('div', { class: 'sub' }, 'הזן מסנן ולחץ על חיפוש כדי להציג תמלולים.');
     var search = function () {
       results.replaceChildren(h('p', { class: 'sub' }, 'מחפש...'));
@@ -535,12 +552,14 @@
       if (name.value.trim()) q.set('name', name.value.trim());
       if (from.value) q.set('from', from.value);
       if (to.value) q.set('to', to.value);
+      if (mode.value) q.set('assistant_mode', mode.value);
       q.set('limit', '1000');
       api('GET', 'transcripts?' + q.toString()).then(function (data) {
         results.replaceChildren();
         if (!data.items.length) { results.append(h('p', { class: 'sub' }, 'לא נמצאו תמלולים מתאימים.')); return; }
         data.items.forEach(function (item) {
           var date = new Date(item.created_at).toLocaleString('he-IL');
+          var modeLabel = modeLabels[item.assistant_mode] || item.assistant_mode || 'לא ידוע';
           results.append(h('article', { class: 'line' },
             h('span', { class: 'lamp ok', 'aria-hidden': 'true' }),
             h('div', null,
@@ -548,6 +567,7 @@
                 h('strong', null, item.name || 'ללא שם'),
                 h('span', { class: 'num' }, item.phone),
                 h('span', { class: 'sub' }, date)),
+              h('div', { class: 'sub' }, 'סוג עוזר: ' + modeLabel),
               h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המתקשר: ' + item.heard),
               h('p', { style: 'margin-top:6px; white-space:pre-wrap' }, 'העוזר: ' + item.answer)
             )));
@@ -558,10 +578,11 @@
     };
     return h('section', null,
       h('h2', null, 'ארכיון תמלולים'),
-      h('p', { class: 'sub' }, 'חיפוש לפי מספר, שם וטווח תאריכים. התוצאות מוצגות רק למנהל המחובר.'),
+      h('p', { class: 'sub' }, 'חיפוש לפי מספר, שם, סוג עוזר וטווח תאריכים. התוצאות מוצגות רק למנהל המחובר.'),
       h('div', { class: 'add' },
         h('div', null, h('label', { class: 'sub' }, 'מספר טלפון'), phone),
         h('div', null, h('label', { class: 'sub' }, 'שם'), name),
+        h('div', null, h('label', { class: 'sub' }, 'סוג עוזר'), mode),
         h('div', null, h('label', { class: 'sub' }, 'מתאריך'), from),
         h('div', null, h('label', { class: 'sub' }, 'עד תאריך'), to),
         h('button', { onclick: search }, 'חיפוש')),
