@@ -297,17 +297,49 @@
       } }, 'שמירת קוד אישי');
       var historyEnabled = h('input', { type: 'checkbox', checked: p.history_enabled !== false });
       var enabled = h('input', { type: 'checkbox', checked: p.enabled !== false });
+      var mUrl = h('input', { type: 'text', autocomplete: 'off', placeholder: 'https://script.google.com/macros/s/.../exec', dir: 'ltr' });
+      var mSecret = h('input', { type: 'password', autocomplete: 'off', placeholder: 'הסיסמה שהוגדרה בסקריפט (SECRET)' });
+      var scriptBox = h('textarea', { readonly: true, dir: 'ltr', style: 'display:none;min-height:180px;font-family:monospace;font-size:13px' });
+      var mailboxBox = h('div', { class: 'f' },
+        h('strong', null, 'תיבת מייל אישית של המשתמש'),
+        h('div', { class: 'state' }, p.mail_own ? 'מחוברת תיבה אישית. העוזר קורא ושולח רק מהתיבה הזו עבור המשתמש.'
+          : (p.mail_global ? 'לא מחוברת תיבה אישית. יש לו גישה לתיבה הראשית שלך.' : 'לא מחוברת תיבה. אין לו גישה למייל.')),
+        h('p', { class: 'sub' }, 'כדי לחבר תיבה, המשתמש מדביק את הסקריפט בחשבון הגוגל שלו (script.google.com), מגדיר סיסמה, מפעיל אותו כאפליקציית אינטרנט ושולח לך את הכתובת והסיסמה.'),
+        h('button', { class: 'quiet', type: 'button', onclick: function () {
+          fetch('/admin/api/mail_script', { credentials: 'same-origin' }).then(function (r) { return r.text(); }).then(function (t) {
+            scriptBox.value = t; scriptBox.style.display = 'block'; scriptBox.select();
+            say('הסקריפט מוצג. העתק אותו ושלח למשתמש');
+          });
+        } }, 'הצגת הסקריפט להעתקה'),
+        scriptBox,
+        h('label', { class: 'f' }, 'כתובת הסקריפט', mUrl),
+        h('label', { class: 'f' }, 'סיסמת הסקריפט', mSecret),
+        h('div', { class: 'bar' },
+          h('button', { type: 'button', onclick: function () {
+            act('מחבר תיבה', function () { return api('PUT', 'caller', { phone: phone, mail_own_url: mUrl.value, mail_own_secret: mSecret.value }); }).then(function () { profileFolder(phone); });
+          } }, 'חיבור התיבה'),
+          p.mail_own ? h('button', { class: 'quiet', type: 'button', onclick: function () {
+            say('בודק חיבור...');
+            api('POST', 'caller/' + encodeURIComponent(phone) + '/mail_test').then(function (j) { say(j.ok ? 'התיבה מחוברת ועובדת' : 'החיבור נכשל: ' + j.error, !j.ok); });
+          } }, 'בדיקת חיבור') : null,
+          p.mail_own ? h('button', { class: 'danger', type: 'button', onclick: function () {
+            if (confirm('לנתק את התיבה האישית?')) act('מנתק תיבה', function () { return api('PUT', 'caller', { phone: phone, clear_mail_own: true }); }).then(function () { profileFolder(phone); });
+          } }, 'ניתוק התיבה') : null));
       var content = h('section', null,
-        h('h2', null, '7. אזור אישי'),
+        h('h2', null, 'תיק אישי'),
         h('p', { class: 'sub' }, 'מספר הטלפון הוא המזהה הייחודי של המשתמש. היסטוריית השיחות וההתראות משויכות אליו.'),
         h('div', { class: 'ident' }, h('strong', { class: 'phone num' }, phone)),
         h('label', { class: 'f' }, 'שם פרטי', name),
         h('label', { class: 'f' }, 'קוד כניסה לאזור האישי (יוצג פעם אחת בלבד)', personalPin),
         pinSave,
-        h('label', { class: 'f' }, 'כתובת שהוקצתה למשתמש', address),
-        h('label', { class: 'f' }, 'כתובת דוא״ל / תיבה', email),
-        h('label', { class: 'check' }, emailEnabled, 'אפשר גישה למייל עבור המשתמש'),
-        h('p', { class: 'sub' }, 'הערה: חיבור OAuth נפרד לתיבת Gmail של כל משתמש עדיין אינו מוגדר; כרגע נשמרים פרטי המשתמש והרשאת הגישה.'),
+        h('div', { class: 'f' }, h('strong', null, 'מפתח Gemini (כתובת ה-API) של המשתמש'),
+          h('div', { class: 'state' }, p.key_state === 'personal' ? ('מפתח אישי שהוזן ידנית ' + (p.key_mask || ''))
+            : p.key_state === 'pool' ? 'מפתח שהוקצה אוטומטית מהמאגר'
+            : 'עדיין לא הוקצה מפתח. המשתמש משתמש במפתח המשותף עד שיוקצה לו אחד מהמאגר')),
+        h('label', { class: 'f' }, 'פרטים נוספים על הכתובת שהוקצתה (הערה חופשית)', address),
+        h('label', { class: 'f' }, 'כתובת דוא״ל לתיעוד', email),
+        h('label', { class: 'check' }, emailEnabled, 'מותר לו להשתמש בתיבת המייל הראשית שלי'),
+        mailboxBox,
         h('label', { class: 'check' }, chatEnabled, 'צ׳אט – הגדרה בלבד, ממתין לחיבור השירות'),
         h('label', { class: 'f' }, 'תפריט העוזר – סגנון למשתמש', mode),
         h('label', { class: 'check' }, toolsEnabled, 'הרשאה לכלי AI'),
@@ -326,14 +358,22 @@
           h('button', { class: 'quiet', onclick: load }, 'חזרה לרשימת המשתמשים')
         )
       );
+      var errs = (data.errors || []).map(function (e) {
+        return h('article', { class: 'line' },
+          h('span', { class: 'lamp warn' }),
+          h('div', null, h('strong', null, e.err || 'שגיאה לא ידועה'),
+            h('div', { class: 'sub' }, new Date(e.t * 1000).toLocaleString('he-IL') + ' (מאז הפעלת השרת האחרונה)')));
+      });
       var alerts = h('section', null,
         h('h2', null, 'התראות ותקלות'),
+        data.db_error ? h('div', { class: 'warnbox' }, data.db_error) : null,
+        errs,
         data.alerts && data.alerts.length ? data.alerts.map(function (a) {
           return h('article', { class: 'line' },
             h('span', { class: 'lamp warn' }),
             h('div', null, h('strong', null, a.message),
               h('div', { class: 'sub' }, new Date(a.created_at).toLocaleString('he-IL'))));
-        }) : h('p', { class: 'sub' }, 'אין כרגע התראות פתוחות למשתמש זה.')
+        }) : (errs.length ? null : h('p', { class: 'sub' }, 'אין כרגע התראות פתוחות למשתמש זה.'))
       );
       var history = h('section', null,
         h('h2', null, 'שיחות ותמלולים'),

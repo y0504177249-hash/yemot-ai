@@ -75,6 +75,45 @@ MAIL_WEBHOOK_SECRET = os.environ.get("MAIL_WEBHOOK_SECRET", "").strip()
 WEBHOOK_ENABLED = bool(MAIL_WEBHOOK_URL and MAIL_WEBHOOK_SECRET)
 EMAIL_ENABLED = bool(WEBHOOK_ENABLED or (BREVO_API_KEY and MAIL_FROM))
 
+def _fernet():
+    k = os.environ.get("GEMINI_KEY_ENCRYPTION_KEY", "").strip()
+    return Fernet(k.encode("ascii")) if k else None
+
+
+def enc_secret(text):
+    f = _fernet()
+    return ("enc:" + f.encrypt(text.encode("utf-8")).decode("ascii")) if f else ("raw:" + text)
+
+
+def dec_secret(text):
+    text = str(text or "")
+    if text.startswith("enc:"):
+        f = _fernet()
+        return f.decrypt(text[4:].encode("ascii")).decode("utf-8") if f else ""
+    return text[4:] if text.startswith("raw:") else ""
+
+
+def own_mail(phone):
+    m = (_store["callers"].get(phone) or {}).get("mail_own") or {}
+    return m if m.get("url") and m.get("secret") else None
+
+
+def mail_target(owner=False):
+    # תיבה אישית של המתקשר אם הוגדרה, אחרת התיבה הראשית
+    if not owner:
+        own = own_mail(getattr(_tls, "phone", ""))
+        if own:
+            return own["url"], dec_secret(own["secret"])
+    return MAIL_WEBHOOK_URL, MAIL_WEBHOOK_SECRET
+
+
+def mail_enabled_for(phone):
+    if own_mail(phone):
+        return True
+    prof = _store["callers"].get(phone) or {}
+    return bool(EMAIL_ENABLED and phone_allowed(phone) and prof.get("email_enabled", prof.get("mail", True)))
+
+
 def build_email_prompt(contacts):
     common = (
         " בפורמט ה-JSON אפשר להוסיף את השדות send_email, confirm_pending (ברירת מחדל null). "
@@ -85,7 +124,7 @@ def build_email_prompt(contacts):
         "כשהמשתמש אומר כתובת מייל בקול, כתוב אותה בצורה תקנית (שטרודל הוא @ ונקודה היא .). "
         "אם יש הערת מערכת שמייל ממתין לאישור: כן או אישור = confirm_pending=\"yes\", לא או ביטול = confirm_pending=\"no\", ובקשת שינוי = send_email חדש. "
     )
-    if WEBHOOK_ENABLED:
+    if mail_target()[0]:
         return (
             " יש חיבור לתיבת המייל דרך שירות הדואר המחובר. " + common +
             "לקריאת מיילים הגדר mail={\"action\": \"search\", \"query\": \"שאילתת ג'ימייל\"}, למשל is:unread או from:דני או newer_than:1d או subject:חשבונית או in:inbox. "
@@ -98,7 +137,7 @@ def build_email_prompt(contacts):
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "1") == "1"
 TTS_MODEL = os.environ.get("TTS_MODEL", "").strip()
 # קולות חמים ורגועים קודם. מחליפים בהאמירה "החלף קול"
-VOICES = ["Sulafat", "Vindemiatrix", "Achernar", "Achird", "Algieba", "Gacrux", "Despina", "Schedar"]
+VOICES = ["Sulafat", "Vindemiatrix", "Achernar", "Achird", "Algieba", "Gacrux", "Despina", "Schedar", "Puck", "Charon", "Kore"]
 VOICE_PROMPT = (
     " כשהמשתמש מבקש להחליף קול (למשל החלף קול), הגדר בפורמט ה-JSON את השדה change_voice=true, "
     "וב-answer אמור שהחלפת קול. בכל מקרה אחר השדה change_voice הוא false."
@@ -236,11 +275,12 @@ def system_prompt():
     # Fixed assistant personality per Yemot extension: 1/1 = Yiddish rosh yeshiva; 8 = Hebrew smart Rudy.
     selected_mode = getattr(_tls, "assistant_mode", "yeshiva" if yiddish_mode() else "smart")
     tools_allowed = profile.get("tools_enabled", True) is not False
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), EMAIL_ENABLED, yiddish_mode(), selected_mode, tools_allowed)
+    mail_ok = selected_mode in ("smart", "tools") and tools_allowed and mail_enabled_for(getattr(_tls, "phone", ""))
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed)
     if key not in _prompt_cache:
         mode_prompts = {
             "smart": "סגנון רודי חכם: היה חד, מועיל, סקרן, מדויק וענייני. הסבר בפשטות והתאם את התשובה למשתמש.",
-            "edgy": "סגנון רודי עוקצן: השתמש בהומור חד, עקיצות קלילות ושנינות, אך אל תשפיל, תאיים או תפגע בקבוצות או באנשים באופן אכזרי.",
+            "edgy": "סגנון רודי עוקצן: חד לשון, סרקסטי ושנון, בסגנון רוסט בין חברים. עקוץ, הקנט וגלגל עיניים על מה שהמשתמש אומר ועל השאלות שלו, בהומור יבש וציני, ובכל זאת תן תשובה נכונה ושימושית. מותר להיות פוגעני בהקנטה של חברים, אבל אל תעליב על מוצא, דת, מגדר, מראה, מחלה או נכות, אל תגדף בגסות ואל תאיים. אם המשתמש נשמע באמת פגוע, עצוב או במצוקה, עבור מיד לטון אנושי ורגוע.",
             "psychologist": "סגנון פסיכולוגית: הקשיבי באמפתיה, שאלי שאלות פתוחות, שיקפי רגשות והציעי צעד קטן. אינך פסיכולוגית מוסמכת, אל תאבחני ואל תחליפי טיפול מקצועי.",
             "yeshiva": ("זיי א קלוגער ראש ישיבה: רעד מיט חכמה, רואיגקייט און דרך ארץ. דערקלער א זאך מיט א קורצן משל אדער א פשוטער מעשה ווען עס העלפט, און געב א קליינעם מעשיות'דיגן שריט. מאך נישט קיין פאבריצירטע ציטאטן אדער מקורות." if yiddish_mode() else "סגנון ראש ישיבה: דבר בחכמה, בנחת ובבהירות, עם משל קצר ומסר מעשי כשמתאים. אל תמציא ציטוטים או מקורות."),
             "yiddish": "סגנון משפיע באידיש: ענה ביידיש טבעית, חמה וישיבתית בלבד, בלי אנגלית ובלי לעז.",
@@ -274,7 +314,7 @@ def system_prompt():
         text += " " + mode_prompts.get(selected_mode, mode_prompts["smart"])
         if voice_on():
             text += VOICE_PROMPT
-        if EMAIL_ENABLED:
+        if mail_ok:
             text += build_email_prompt(contacts)
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
@@ -306,7 +346,7 @@ def _store_error(e):
 def refresh_store():
     try:
         if WEBHOOK_ENABLED:
-            res = mail_json({"action": "config_get"})
+            res = mail_json({"action": "config_get"}, owner=True)
             if not isinstance(res, dict) or ("settings" not in res and "callers" not in res):
                 raise RuntimeError("unknown")
             data, source = res, "google"
@@ -316,7 +356,7 @@ def refresh_store():
                     data = local
                     for sec in ("settings", "callers"):
                         try:
-                            mail_json({"action": "config_set", "section": sec, "value": local.get(sec) or {}})
+                            mail_json({"action": "config_set", "section": sec, "value": local.get(sec) or {}}, owner=True)
                         except Exception:
                             pass
         else:
@@ -357,7 +397,7 @@ def persist(section, value):
     _write_local()
     if WEBHOOK_ENABLED:
         try:
-            res = mail_json({"action": "config_set", "section": section, "value": value})
+            res = mail_json({"action": "config_set", "section": section, "value": value}, owner=True)
             if not (isinstance(res, dict) and res.get("ok")):
                 raise RuntimeError("unknown")
             _store["source"] = "google"
@@ -377,12 +417,12 @@ if os.environ.get("CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS") == "1":
         ("ivr2:1", "he", "smart", "רודי חכם"),
         ("ivr2:2", "he", "edgy", "רודי עוקצן"),
         ("ivr2:3", "he", "psychologist", "פסיכולוגית"),
-        ("ivr2:4", "yi", "yeshiva", "ראש ישיבה"),
+        ("ivr2:4", "he", "yeshiva", "ראש ישיבה"),
         ("ivr2:5", "yi", "yiddish", "משפיע באידיש"),
         ("ivr2:6", "he", "tools", "מרכז כלי AI"),
-        ("ivr2:7", "he", "astrology", "אסטרולוגיה ומפת אישיות"),
+        ("ivr2:7", "he", "personal", "אזור אישי"),
         # Keep existing entry points working with the requested reassignment.
-        ("ivr2:1/1", "yi", "yeshiva", "ראש ישיבה"),
+        ("ivr2:1/1", "yi", "yiddish", "משפיע באידיש"),
         ("ivr2:8", "he", "smart", "רודי חכם"),
     )
     for extension_path, language, mode, title in yemot_extensions:
@@ -452,14 +492,66 @@ _history_loaded = set()
 _caller_loaded = set()
 
 
+_db_ready = False
+
+
+def db_init(conn):
+    # יוצר את הטבלאות הדרושות אם אינן קיימות, כדי שחיבור מסד נתונים ריק יעבוד מיד
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS caller_profiles (
+                phone VARCHAR(30) PRIMARY KEY,
+                display_name TEXT NOT NULL DEFAULT '',
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS call_transcripts (
+                id BIGSERIAL PRIMARY KEY,
+                call_id TEXT NOT NULL DEFAULT '',
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                caller_name TEXT NOT NULL DEFAULT '',
+                heard TEXT NOT NULL DEFAULT '',
+                answer TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            cur.execute("CREATE INDEX IF NOT EXISTS call_transcripts_phone_idx ON call_transcripts(phone, created_at DESC)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS gemini_key_pool (
+                id BIGSERIAL PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                encrypted_key TEXT NOT NULL,
+                key_fingerprint TEXT NOT NULL UNIQUE,
+                assigned_phone VARCHAR(30),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                assigned_at TIMESTAMPTZ,
+                disabled BOOLEAN NOT NULL DEFAULT FALSE)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS admin_notifications (
+                id BIGSERIAL PRIMARY KEY,
+                kind TEXT NOT NULL,
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                message TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                resolved_at TIMESTAMPTZ)""")
+            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS admin_notifications_open_unique
+                ON admin_notifications(kind, phone) WHERE resolved_at IS NULL""")
+    db_ensure_profile_columns(conn)
+    conn.commit()
+
+
 def db_connect():
+    global _db_ready
     if not DATABASE_URL or psycopg is None:
         return None
     try:
-        return psycopg.connect(DATABASE_URL, connect_timeout=15)
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=15)
     except Exception as e:
         print("database connection failed:", redact(e), flush=True)
         return None
+    if not _db_ready:
+        try:
+            db_init(conn)
+            _db_ready = True
+            print("database tables ready", flush=True)
+        except Exception as e:
+            print("database init failed:", redact(e), flush=True)
+    return conn
 
 
 def db_notify_key_pool_empty(phone):
@@ -763,8 +855,8 @@ def admin_menu_text(message=""):
     voice = "מופעל" if voice_on() else "כבוי"
     return (prefix + f"תפריט ניהול. מצב העוזר: {enabled}. קול: {voice}. "
             "לבדיקת מצב הקש 1. להפעלה או כיבוי של העוזר הקש 2. למענה קולי הקש 3. "
-            "להחלפת קול הקש 4. ליציאה לשיחה רגילה הקש 5. לתמלולי שיחות אחרונות הקש 6. "
-            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8. ליציאה מהירה הקש סולמית או 0.")
+            "להחלפת קול ברירת המחדל הקש 4. להתראות ושגיאות הקש 5. לתמלולי שיחות אחרונות הקש 6. "
+            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8. לחזרה לאזור האישי הקש 0.")
 
 
 def admin_status_text():
@@ -778,8 +870,9 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 MAIL_READ_PROMPT = "ענה בעברית בלי רשימות, כוכביות, אימוג'ים או סימנים מיוחדים."
 
 
-def mail_json(payload):
-    r = requests.post(MAIL_WEBHOOK_URL, json=dict(payload, secret=MAIL_WEBHOOK_SECRET), timeout=25)
+def mail_json(payload, owner=False):
+    url, secret = mail_target(owner)
+    r = requests.post(url, json=dict(payload, secret=secret), timeout=25)
     r.raise_for_status()
     txt = r.text.strip()
     if txt == "forbidden":
@@ -793,10 +886,11 @@ def mail_json(payload):
 def send_mail_to(to_addr, subject, body):
     subject = (subject or "הודעה")[:200]
     body = (body or "")[:5000]
-    if WEBHOOK_ENABLED:
+    hook_url, hook_secret = mail_target()
+    if hook_url and hook_secret:
         r = requests.post(
-            MAIL_WEBHOOK_URL,
-            json={"secret": MAIL_WEBHOOK_SECRET, "action": "send", "to": to_addr, "subject": subject, "body": body},
+            hook_url,
+            json={"secret": hook_secret, "action": "send", "to": to_addr, "subject": subject, "body": body},
             timeout=25,
         )
         r.raise_for_status()
@@ -830,7 +924,7 @@ def resolve_recipient(to):
         return [{"name": to, "email": contacts[to]}]
     if EMAIL_RE.match(to):
         return [{"name": "", "email": to}]
-    if WEBHOOK_ENABLED:
+    if mail_target()[0]:
         res = mail_json({"action": "find_contact", "name": to})
         return [c for c in res.get("contacts", []) if c.get("email")]
     return []
@@ -1055,13 +1149,32 @@ TTS_STYLE = "A warm, gentle, calming and reassuring voice, soft and friendly, sp
 YIDDISH_TTS_STYLE = "A warm, wise, reassuring Hasidic yeshiva mentor voice: calm, deeply empathetic, thoughtful and grounded, like a trusted spiritual mentor with psychological insight. Speak only natural everyday Yiddish, with authentic pronunciation, a gentle measured pace, thoughtful pauses, and sincere warmth. Do not use English, foreign loanwords, or mixed-language expressions. Avoid theatrical preaching or exaggerated emotion."
 
 
+MODE_TTS_STYLES = {
+    "edgy": "A dry, witty, sarcastic voice with a playful smirk, quick and a little mocking, natural conversational Hebrew.",
+    "psychologist": "A warm, soft, gentle female therapist voice: slow, calm, reassuring, with empathic pauses and a caring tone, speaking Hebrew.",
+    "yeshiva": "An elderly, wise, fatherly rosh yeshiva voice: deep, calm, thoughtful and warm, measured pace, with traditional yeshiva intonation, speaking Hebrew.",
+    "tools": "A clear, efficient, friendly and neutral voice at a natural pace, speaking Hebrew.",
+}
+MODE_VOICES = {"smart": "Sulafat", "edgy": "Puck", "psychologist": "Vindemiatrix", "yeshiva": "Charon", "yiddish": "Schedar", "tools": "Kore", "personal": "Sulafat"}
+
+
+def voice_index_for(phone, mode=""):
+    v = caller(phone).get("voice")
+    if v in VOICES:
+        return VOICES.index(v)
+    mv = MODE_VOICES.get(mode)
+    if mv in VOICES:
+        return VOICES.index(mv)
+    return default_voice_index()
+
+
 def tts_wav(text, voice):
     last_err = None
     for name in TTS_MODELS:
         if _is_bad(name):
             continue
         try:
-            style = YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE
+            style = MODE_TTS_STYLES.get(getattr(_tls, "assistant_mode", ""), "") or (YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE)
             interaction = cur_client().interactions.create(
                 model=name,
                 input=[{
@@ -1281,7 +1394,7 @@ def do_lookup(lookup, heard):
 def ask_gemini(call_id, audio_bytes, phone=""):
     history = histories.setdefault(call_id, [])
     if phone and call_id not in _history_loaded:
-        for heard_old, answer_old in db_load_history(phone):
+        for heard_old, answer_old in (db_load_history(phone) if caller(phone).get("history_enabled", True) else []):
             if heard_old:
                 history.append(types.Content(role="user", parts=[types.Part(text=heard_old)]))
                 history.append(types.Content(role="model", parts=[types.Part(text=answer_old)]))
@@ -1291,7 +1404,8 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     with lock:
         st0 = calls.get(call_id)
         has_pending = bool(st0 and st0.get("pending"))
-    if has_pending and EMAIL_ENABLED:
+    mail_ok = getattr(_tls, "assistant_mode", "smart") in ("smart", "tools") and mail_enabled_for(phone)
+    if has_pending and mail_ok:
         parts.append(types.Part(text="הערת מערכת: יש מייל ממתין לאישור המשתמש."))
     contents = list(history) + [types.Content(role="user", parts=parts)]
     res = generate(contents)
@@ -1306,19 +1420,17 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     confirm = data.get("confirm_pending")
 
     try:
-        if EMAIL_ENABLED and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
+        if mail_ok and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
             print(f"mail request from {phone or 'unknown'}", flush=True)
             _tls.kind = "mail"
-            profile = caller(phone)
-            profile_email_allowed = profile.get("email_enabled", profile.get("mail", phone_allowed(phone)))
-            if not profile_email_allowed or not phone_allowed(phone):
+            if not mail_enabled_for(phone):
                 print("mail blocked: phone not allowed", flush=True)
                 answer = "אין לך הרשאה לגשת למיילים"
             elif confirm:
                 answer = confirm_email(call_id, confirm)
             elif isinstance(send, dict):
                 answer = prepare_email(call_id, send)
-            elif isinstance(mail, dict) and WEBHOOK_ENABLED:
+            elif isinstance(mail, dict) and mail_target()[0]:
                 t = time.time()
                 answer = handle_mail(call_id, mail, heard)
                 print(f"timing: mail {mail.get('action')} {time.time() - t:.1f}s", flush=True)
@@ -1339,14 +1451,14 @@ def ask_gemini(call_id, audio_bytes, phone=""):
         history.append(types.Content(role="user", parts=[types.Part(text=heard)]))
         history.append(types.Content(role="model", parts=[types.Part(text=answer)]))
         history[:] = history[-12:]
-        if phone:
+        if phone and caller(phone).get("history_enabled", True):
             db_save_transcript(call_id, phone, heard, answer)
     return answer, change_voice
 
 
 def transcribe_caller_name(recorded, phone, use_yiddish):
     _tls.yiddish = bool(use_yiddish)
-    _tls.record_path = "/1/1" if use_yiddish else "/8"
+    _tls.phone = phone
     try:
         audio = download_recording(recorded)
         language_instruction = (
@@ -1381,6 +1493,7 @@ def transcribe_caller_name(recorded, phone, use_yiddish):
 
 
 def worker_name(call_id, recorded, phone, use_yiddish):
+    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if use_yiddish else "/8")
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in all_keys() else "default"
     name = transcribe_caller_name(recorded, phone, use_yiddish)
@@ -1401,8 +1514,8 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None):
     _tls.phone = phone
     _tls.yiddish = YIDDISH_MODE if use_yiddish is None else bool(use_yiddish)
     _tls.assistant_mode = assistant_mode or ("yiddish" if _tls.yiddish else "smart")
-    _tls.record_path = "/1/1" if _tls.yiddish else "/8"
-    _tls.extension_path = "/1/1" if _tls.yiddish else "/8"
+    _tls.phone = phone
+    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if _tls.yiddish else "/8")
     t0 = time.time()
     failed = False
     err = ""
@@ -1439,6 +1552,8 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None):
             print("voice error:", redact(e), flush=True)
             audio_path = None
 
+    if failed and phone:
+        db_notify_runtime_error(phone, "שגיאה בשיחה: " + (err or "לא ידועה"))
     events.appendleft({
         "t": time.time(), "phone": phone or "?", "kind": getattr(_tls, "kind", "chat"),
         "ok": not failed, "sec": round(time.time() - t0, 1), "voice": bool(audio_path), "err": err,
@@ -1459,6 +1574,266 @@ def cleanup_old():
         _history_loaded.discard(cid)
 
 
+ADMIN_PHONES = [re.sub(r"\D", "", x) for x in os.environ.get("ADMIN_PHONES", "").split(",") if re.sub(r"\D", "", x)]
+_admin_fails = {}
+
+
+def admin_phone_ok(phone):
+    return (not ADMIN_PHONES) or phone in ADMIN_PHONES
+
+
+def admin_locked(phone):
+    now = time.time()
+    fails = [t for t in _admin_fails.get(phone, []) if now - t < 900]
+    _admin_fails[phone] = fails
+    return len(fails) >= 5
+
+
+def _digits(st, text, maxd=1, mind=1):
+    # שם שדה חדש בכל שאלה, כדי שערך ישן מהשיחה לא יתפס כבחירה חדשה
+    st["pc"] = st.get("pc", 0) + 1
+    st["field"] = "k%d" % st["pc"]
+    st["awaiting"] = True
+    return Response(admin_digits_command(text, st["field"], maxd, mind), mimetype="text/plain")
+
+
+def _speak_back(text):
+    return Response("id_list_message=t-" + clean_for_tts(text) + "&go_to_folder=" + active_extension_path(), mimetype="text/plain")
+
+
+def key_pool_has(phone):
+    try:
+        conn = db_connect()
+        if conn is None:
+            return False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM gemini_key_pool WHERE assigned_phone=%s AND NOT disabled LIMIT 1", (phone,))
+                return cur.fetchone() is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def personal_menu_text(phone, message=""):
+    prefix = (message + ". ") if message else ""
+    name = caller(phone).get("name", "")
+    text = (prefix + "האזור האישי" + (" של " + name if name else "") + ". "
+            "לשמיעת פרטי הפרופיל שלך הקש 1. להחלפת הקול שלך הקש 2. לעדכון השם שלך הקש 3. "
+            "להפעלה או כיבוי של שמירת היסטוריית השיחות הקש 4. לשמיעת השיחה האחרונה שלך הקש 5. ")
+    if admin_phone_ok(phone):
+        text += "לניהול המערכת הקש 9. "
+    return text + "לשמיעה חוזרת הקש 0."
+
+
+def profile_text(phone):
+    c = caller(phone)
+    if all_keys().get(phone):
+        key = "יש לך מפתח אישי"
+    elif key_pool_has(phone):
+        key = "הוקצה לך מפתח מהמאגר"
+    else:
+        key = "אין לך מפתח אישי כרגע ואתה משתמש במפתח המשותף"
+    mail = "מחוברת תיבת מייל אישית" if own_mail(phone) else ("יש לך גישה לתיבת המייל הראשית" if mail_enabled_for(phone) else "אין לך חיבור למייל")
+    hist = "מופעלת" if c.get("history_enabled", True) else "כבויה"
+    digits = " ".join(phone)
+    return f"שמך {c.get('name') or 'לא הוגדר'}. מספר הטלפון שלך {digits}. {key}. {mail}. שמירת ההיסטוריה {hist}"
+
+
+def _save_profile(phone, **changes):
+    callers = {k: dict(v) for k, v in _store["callers"].items()}
+    prof = callers.get(phone, {"enabled": True, "mail": False})
+    prof.update(changes)
+    callers[phone] = prof
+    _caller_loaded.add(phone)
+    warning = persist("callers", callers)
+    db_save_caller(phone, prof)
+    return warning
+
+
+def worker_rename(call_id, recorded, phone):
+    _tls.phone = phone
+    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or "/7"
+    _tls.client = client_for(phone)
+    _tls.keyid = phone if phone in all_keys() else "default"
+    name = transcribe_caller_name(recorded, phone, False)
+    with lock:
+        st = calls.get(call_id)
+        if st is not None:
+            st["rename_status"] = "done"
+            st["rename_result"] = name
+            st["last"] = recorded
+
+
+def alerts_text():
+    now = time.time()
+    recent = [e for e in events if not e.get("ok") and now - e.get("t", 0) < 86400]
+    parts = [f"בעשרים וארבע השעות האחרונות היו {len(recent)} שגיאות"]
+    if recent:
+        e = recent[0]
+        parts.append("האחרונה ממספר " + " ".join(str(e.get("phone", ""))))
+    for n in db_list_notifications()[:3]:
+        parts.append(n["message"])
+    if not DATABASE_URL:
+        parts.append("מסד הנתונים אינו מחובר")
+    return ". ".join(parts)
+
+
+def phone_area(st, p, call_id, phone, recorded):
+    mode = st.get("pa_mode") or "menu"
+
+    if mode == "rename_wait":
+        if st.get("rename_status") == "processing":
+            return Response(wait_command(), mimetype="text/plain")
+        if st.get("rename_status") == "done":
+            new = st.pop("rename_result", "")
+            st["rename_status"] = None
+            st["pa_mode"] = "menu"
+            msg = ("שמך עודכן ל" + new) if new else "לא הצלחתי לשמוע את השם. נסה שוב"
+            return _digits(st, personal_menu_text(phone, msg))
+    if mode == "rename_record":
+        if recorded and recorded != st.get("last"):
+            st["last"] = recorded
+            st["pa_mode"] = "rename_wait"
+            st["rename_status"] = "processing"
+            threading.Thread(target=worker_rename, args=(call_id, recorded, phone), daemon=True).start()
+            return Response(wait_command(), mimetype="text/plain")
+        st["turn"] += 1
+        fname = "n" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10] + str(st["turn"])
+        return Response(f"read=t-{clean_for_tts('אמור את שמך הפרטי ובסיום הקש סולמית')}=question,no,record,{active_record_path()},{fname},no,yes,no", mimetype="text/plain")
+
+    if st.get("awaiting"):
+        st["awaiting"] = False
+        val = (p.get(st.get("field", "")) or "").strip()
+        return _pa_handle(st, mode, val, call_id, phone)
+    return _pa_show(st, mode, phone)
+
+
+def _pa_show(st, mode, phone):
+    if mode == "admin" and st.get("is_admin"):
+        return _digits(st, admin_menu_text())
+    if mode == "code":
+        return _digits(st, "הקש את קוד הניהול", 12, 1)
+    if mode in ("block", "unblock"):
+        return _digits(st, "הקש את מספר הטלפון", 15, 9)
+    st["pa_mode"] = "menu"
+    return _digits(st, personal_menu_text(phone))
+
+
+def _pa_handle(st, mode, val, call_id, phone):
+    if mode == "menu":
+        msg = ""
+        if val == "1":
+            msg = profile_text(phone)
+        elif val == "2":
+            nxt = (voice_index_for(phone, "") + 1) % len(VOICES)
+            _save_profile(phone, voice=VOICES[nxt])
+            st["voice"] = nxt
+            msg = f"הקול שלך הוחלף לקול מספר {nxt + 1}"
+        elif val == "3":
+            st["pa_mode"] = "rename_record"
+            return phone_area(st, request.values, call_id, phone, None)
+        elif val == "4":
+            on = not caller(phone).get("history_enabled", True)
+            _save_profile(phone, history_enabled=on)
+            msg = "שמירת ההיסטוריה הופעלה" if on else "שמירת ההיסטוריה כובתה. שיחות חדשות לא יישמרו"
+        elif val == "5":
+            turns = db_load_history(phone) if caller(phone).get("history_enabled", True) else []
+            if turns:
+                heard, answer = turns[-1]
+                msg = f"בשיחה האחרונה אמרת: {clean_for_tts(heard)[:200]}. ועניתי: {clean_for_tts(answer)[:250]}"
+            else:
+                msg = "אין שיחות שמורות"
+        elif val == "9" and admin_phone_ok(phone):
+            if admin_locked(phone):
+                msg = "יותר מדי ניסיונות. נסה מאוחר יותר"
+            else:
+                st["pa_mode"] = "code"
+                return _digits(st, "הקש את קוד הניהול", 12, 1)
+        elif val not in ("", "0"):
+            msg = "לא זיהיתי את הבחירה"
+        return _digits(st, personal_menu_text(phone, msg))
+
+    if mode == "code":
+        ok = bool(val) and not admin_locked(phone) and hmac.compare_digest(val.encode("utf-8"), PHONE_ADMIN_CODE.encode("utf-8"))
+        if ok:
+            st["is_admin"] = True
+            st["pa_mode"] = "admin"
+            return _digits(st, admin_menu_text("הקוד אושר"))
+        _admin_fails.setdefault(phone, []).append(time.time())
+        print("phone admin code rejected for ending", phone[-4:], flush=True)
+        st["pa_mode"] = "menu"
+        return _digits(st, personal_menu_text(phone, "הקוד שגוי"))
+
+    if not st.get("is_admin"):
+        st["pa_mode"] = "menu"
+        return _digits(st, personal_menu_text(phone))
+
+    if mode == "admin":
+        msg = ""
+        if val == "1":
+            msg = admin_status_text()
+        elif val == "2":
+            settings = dict(_store["settings"])
+            settings["system_enabled"] = not bool(cfg("system_enabled"))
+            warn = persist("settings", settings)
+            msg = ("העוזר הופעל" if settings["system_enabled"] else "העוזר כובה") + ((". " + warn) if warn else "")
+        elif val == "3":
+            settings = dict(_store["settings"])
+            settings["voice_enabled"] = not voice_on()
+            persist("settings", settings)
+            msg = "המענה הקולי הופעל" if settings["voice_enabled"] else "המענה הקולי כובה"
+        elif val == "4":
+            settings = dict(_store["settings"])
+            settings["default_voice"] = VOICES[(default_voice_index() + 1) % len(VOICES)]
+            persist("settings", settings)
+            msg = "קול ברירת המחדל הוחלף"
+        elif val == "5":
+            msg = alerts_text()
+        elif val == "6":
+            items = db_admin_recent_transcripts(5)
+            if not items:
+                msg = "לא נמצאו תמלולי שיחות שמורים"
+            else:
+                st["pa_tr"] = items
+                st["pa_mode"] = "tpick"
+                options = " ".join(f"{i + 1}. {clean_for_tts(it['name'] or it['phone'])} {it['created_at']}" for i, it in enumerate(items))
+                return _digits(st, "חמש השיחות האחרונות. " + options + ". להאזנה לתמלול הקש את מספר השיחה")
+        elif val == "7":
+            st["pa_mode"] = "block"
+            return _digits(st, "הקש את מספר הטלפון שברצונך לחסום", 15, 9)
+        elif val == "8":
+            st["pa_mode"] = "unblock"
+            return _digits(st, "הקש את מספר הטלפון שברצונך לפתוח מחסימה", 15, 9)
+        elif val in ("0", ""):
+            st["pa_mode"] = "menu"
+            return _digits(st, personal_menu_text(phone))
+        else:
+            msg = "לא זיהיתי את הבחירה"
+        return _digits(st, admin_menu_text(msg))
+
+    if mode == "tpick":
+        items = st.pop("pa_tr", []) or []
+        st["pa_mode"] = "admin"
+        if val.isdigit() and 1 <= int(val) <= len(items):
+            it = items[int(val) - 1]
+            return _speak_back(f"שיחה מאת {it['name'] or it['phone']}. בתאריך {it['created_at']}. המתקשר אמר: {it['heard']}. תשובת העוזר: {it['answer']}")
+        return _digits(st, admin_menu_text("בחירה לא תקינה"))
+
+    if mode in ("block", "unblock"):
+        target = re.sub(r"\D", "", val)
+        st["pa_mode"] = "admin"
+        if not 9 <= len(target) <= 15:
+            return _digits(st, admin_menu_text("מספר הטלפון אינו תקין"))
+        enable = mode == "unblock"
+        _save_profile(target, enabled=enable)
+        return _digits(st, admin_menu_text(("החסימה הוסרה עבור המספר " if enable else "המספר נחסם: ") + " ".join(target)))
+
+    st["pa_mode"] = "menu"
+    return _digits(st, personal_menu_text(phone))
+
+
 @app.route("/ivr", methods=["GET", "POST"])
 def ivr():
     p = request.values
@@ -1466,12 +1841,14 @@ def ivr():
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
-    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology"}
+    allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "personal"}
     assistant_mode = requested_mode if requested_mode in allowed_modes else ("yiddish" if requested_lang in ("yi", "yiddish", "1") else "smart")
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
-    _tls.record_path = "/1/1" if use_yiddish else "/8"
-    _tls.extension_path = "/1/1" if use_yiddish else "/8"
+    api_ext = re.sub(r"[^0-9/]", "", str(p.get("ApiExtension", ""))).strip("/")
+    ext_path = ("/" + api_ext) if api_ext else ("/1/1" if use_yiddish else "/8")
+    _tls.record_path = ext_path
+    _tls.extension_path = ext_path
     maybe_refresh()
     db_load_caller(phone)
 
@@ -1497,7 +1874,7 @@ def ivr():
 
     # Load caller history once at the start of each new call, outside the global lock.
     is_new_call = call_id not in calls
-    previous_turns = db_load_history(phone) if is_new_call and phone else []
+    previous_turns = db_load_history(phone) if is_new_call and phone and caller(phone).get("history_enabled", True) else []
     previous_topic = previous_turns[-1][0].strip() if previous_turns else ""
 
     with lock:
@@ -1505,7 +1882,7 @@ def ivr():
         st = calls.setdefault(
             call_id,
             {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
-             "voice": default_voice_index(), "audio": None},
+             "voice": voice_index_for(phone, assistant_mode), "audio": None, "ext_path": ext_path},
         )
         if is_new_call and call_id not in _history_loaded:
             history = histories.setdefault(call_id, [])
@@ -1541,124 +1918,21 @@ def ivr():
                 "ברוכים הבאים למפת האישיות האסטרולוגית שלך. "
                 "כדי להתחיל, אמור את שמך הפרטי ואת יום, חודש ושנת הלידה שלך."
             )
+        who = caller(phone).get("name", "")
+        if assistant_mode == "edgy":
+            greeting = ("אה, " + who + ". שוב אתה. טוב, מה רצית הפעם?") if who else "אה, שוב מישהו. טוב, מה רצית?"
+        elif assistant_mode == "psychologist":
+            greeting = ("שלום " + who + ", ") + "אני כאן ומקשיבה. מה עובר עליך היום?" if who else "שלום, אני כאן ומקשיבה. מה עובר עליך היום?"
+        elif assistant_mode == "yeshiva" and not use_yiddish:
+            greeting = ("בעזרת השם, שלום " + who + ". ") if who else "בעזרת השם, שלום. "
+            greeting += "שב בני, ספר לי, מה על לבך?"
         st.setdefault("opening_greeting", greeting)
         st["t"] = time.time()
 
-        # Phone admin entry is offered only on Hebrew extension 8 and only to mail-authorized callers.
-        if not use_yiddish and assistant_mode == "smart" and phone and EMAIL_ENABLED and phone_allowed(phone):
-            stage = st.get("admin_stage")
-            if stage is None:
-                st["admin_stage"] = "code"
-                return Response(
-                    admin_digits_command("לניהול הקו הקש את קוד הניהול. להמשך לשיחה עם העוזר הקש סולמית.", "admin_code", 10, 1),
-                    mimetype="text/plain",
-                )
-            if stage == "code":
-                if keypad in ("", "#"):
-                    st["admin_stage"] = "chat"
-                elif keypad:
-                    if hmac.compare_digest(keypad, PHONE_ADMIN_CODE):
-                        st["admin_stage"] = "menu"
-                        return Response(admin_digits_command(admin_menu_text("הקוד אושר"), "admin_action", 1, 1), mimetype="text/plain")
-                    st["admin_stage"] = "chat"
-                    return Response(read_command("הקוד שגוי. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
-                # No digits means the caller pressed # to continue to the regular AI assistant.
-                st["admin_stage"] = "chat"
-            elif stage == "menu":
-                if keypad in ("#", "0"):
-                    st["admin_stage"] = "chat"
-                    return Response(read_command("יצאת מתפריט הניהול. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
-                if not keypad:
-                    st["admin_stage"] = "chat"
-                    return Response(read_command("לא התקבלה בחירה. ממשיכים לשיחה עם העוזר. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
-                if keypad == "1":
-                    message = admin_status_text()
-                elif keypad == "2":
-                    settings = dict(_store["settings"])
-                    settings["system_enabled"] = not bool(cfg("system_enabled"))
-                    warning = persist("settings", settings)
-                    message = ("העוזר הופעל" if settings["system_enabled"] else "העוזר כובה")
-                    if warning:
-                        message += ". " + warning
-                elif keypad == "3":
-                    settings = dict(_store["settings"])
-                    settings["voice_enabled"] = not voice_on()
-                    warning = persist("settings", settings)
-                    message = "המענה הקולי הופעל" if settings["voice_enabled"] else "המענה הקולי כובה"
-                    if warning:
-                        message += ". " + warning
-                elif keypad == "4":
-                    current = default_voice_index()
-                    settings = dict(_store["settings"])
-                    settings["default_voice"] = VOICES[(current + 1) % len(VOICES)]
-                    warning = persist("settings", settings)
-                    message = "הקול הוחלף"
-                    if warning:
-                        message += ". " + warning
-                elif keypad == "5":
-                    st["admin_stage"] = "chat"
-                    return Response(read_command("יצאת מתפריט הניהול. איך אפשר לעזור?", call_id, st["turn"]), mimetype="text/plain")
-                elif keypad == "6":
-                    transcripts = db_admin_recent_transcripts(5)
-                    if not transcripts:
-                        message = "לא נמצאו תמלולי שיחות במסד הנתונים"
-                    else:
-                        st["admin_transcripts"] = transcripts
-                        st["admin_stage"] = "transcript_pick"
-                        options = " ".join(
-                            f"{i + 1}. {clean_for_tts(item['name'] or item['phone'])} {item['created_at']}"
-                            for i, item in enumerate(transcripts)
-                        )
-                        return Response(
-                            admin_digits_command("חמש השיחות האחרונות. " + options + ". להאזנה לתמלול הקש את מספר השיחה", "transcript_choice", 1, 1),
-                            mimetype="text/plain",
-                        )
-                elif keypad == "7":
-                    st["admin_stage"] = "block_phone"
-                    return Response(admin_digits_command("הקש את מספר הטלפון שברצונך לחסום", "admin_phone", 15, 9), mimetype="text/plain")
-                elif keypad == "8":
-                    st["admin_stage"] = "unblock_phone"
-                    return Response(admin_digits_command("הקש את מספר הטלפון שברצונך לפתוח מחסימה", "admin_phone", 15, 9), mimetype="text/plain")
-                else:
-                    message = "לא זיהיתי את הבחירה"
-                return Response(admin_digits_command(admin_menu_text(message), "admin_action", 1, 1), mimetype="text/plain")
-            elif stage == "transcript_pick":
-                transcripts = st.get("admin_transcripts") or []
-                if keypad.isdigit() and 1 <= int(keypad) <= len(transcripts):
-                    item = transcripts[int(keypad) - 1]
-                    transcript_text = (
-                        f"שיחה מאת {item['name'] or item['phone']}. בתאריך {item['created_at']}. "
-                        f"המתקשר אמר: {item['heard']}. תשובת העוזר: {item['answer']}"
-                    )
-                    st["admin_stage"] = "menu"
-                    st.pop("admin_transcripts", None)
-                    return Response(
-                        "id_list_message=t-" + clean_for_tts(transcript_text) + "&go_to_folder=/8",
-                        mimetype="text/plain",
-                    )
-                st["admin_stage"] = "menu"
-                return Response(admin_digits_command(admin_menu_text("בחירה לא תקינה"), "admin_action", 1, 1), mimetype="text/plain")
-            elif stage in ("block_phone", "unblock_phone"):
-                target_phone = re.sub(r"\D", "", keypad)
-                if not target_phone.isdigit() or not 9 <= len(target_phone) <= 15:
-                    st["admin_stage"] = "menu"
-                    return Response(admin_digits_command(admin_menu_text("מספר הטלפון אינו תקין"), "admin_action", 1, 1), mimetype="text/plain")
-                profile = dict(caller(target_phone))
-                should_enable = stage == "unblock_phone"
-                profile["enabled"] = should_enable
-                callers = dict(_store["callers"])
-                callers[target_phone] = profile
-                warning = persist("callers", callers)
-                db_ok = db_save_caller(target_phone, profile)
-                st["admin_stage"] = "menu"
-                message = ("החסימה הוסרה עבור המספר " if should_enable else "המספר נחסם: ") + target_phone
-                if warning:
-                    message += ". " + warning
-                if DATABASE_URL and not db_ok:
-                    message += ". לא הצלחתי לאמת שמירה במסד הנתונים"
-                return Response(admin_digits_command(admin_menu_text(message), "admin_action", 1, 1), mimetype="text/plain")
+        if assistant_mode == "personal":
+            return phone_area(st, p, call_id, phone, recorded)
 
-        if not cfg("system_enabled") and st.get("admin_stage") not in ("code", "menu", "transcript_pick", "block_phone", "unblock_phone"):
+        if not cfg("system_enabled"):
             return Response("id_list_message=t-העוזר אינו זמין כרגע&go_to_folder=hangup", mimetype="text/plain")
 
         # First-time callers record their name once, before the first question.
@@ -1744,7 +2018,7 @@ def ivr():
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
-GOOGLE_ADMIN_EMAIL = os.environ.get("GOOGLE_ADMIN_EMAIL", "y0504177249@gmail.com").strip().lower()
+GOOGLE_ADMIN_EMAIL = os.environ.get("GOOGLE_ADMIN_EMAIL", "").strip().lower()  # כתובת המנהל מוגדרת במשתנה סביבה, לא בקוד
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "").strip()
 GOOGLE_LOGIN_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI and google_id_token and google_auth_requests)
 GEMINI_KEY_ENCRYPTION_KEY = os.environ.get("GEMINI_KEY_ENCRYPTION_KEY", "").strip()
@@ -2281,6 +2555,16 @@ def admin_caller_put():
         cur["history_enabled"] = bool(d["history_enabled"])
     if "enabled" in d:
         cur["enabled"] = bool(d["enabled"])
+    if d.get("clear_mail_own"):
+        cur.pop("mail_own", None)
+    murl = str(d.get("mail_own_url", "")).strip()
+    msecret = str(d.get("mail_own_secret", "")).strip()
+    if murl or msecret:
+        if not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]{10,200}/exec", murl):
+            return jsonify({"error": "כתובת הסקריפט חייבת להיראות כך: https://script.google.com/macros/s/.../exec"}), 400
+        if not 8 <= len(msecret) <= 100:
+            return jsonify({"error": "הסיסמה של הסקריפט צריכה להיות באורך 8 עד 100 תווים"}), 400
+        cur["mail_own"] = {"url": murl, "secret": enc_secret(msecret)}
     callers[phone] = cur
     _caller_loaded.add(phone)
     # Allocate an encrypted pool key immediately when an administrator registers a new caller.
@@ -2393,6 +2677,81 @@ def admin_transcripts():
         conn.close()
 
 
+@app.route("/admin/api/caller/<phone>/mail_test", methods=["POST"])
+@admin_required
+def admin_mail_test(phone):
+    phone = re.sub(r"\D", "", phone)[:15]
+    own = own_mail(phone)
+    if not own:
+        return jsonify({"ok": False, "error": "לא הוגדרה תיבה אישית לפרופיל הזה"})
+    try:
+        r = requests.post(own["url"], json={"secret": dec_secret(own["secret"]), "action": "search", "query": "in:inbox", "max": 1}, timeout=25)
+        r.raise_for_status()
+        if r.text.strip() == "forbidden":
+            return jsonify({"ok": False, "error": "הסיסמה לא תואמת לסקריפט"})
+        data = json.loads(r.text)
+        if "messages" not in data:
+            return jsonify({"ok": False, "error": "הסקריפט ענה אבל לא מכיר את הפעולות. הדבק את הקוד המלא מהדף"})
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": redact(str(e))[:150]})
+
+
+MAIL_SCRIPT = """const SECRET = 'PUT-A-LONG-RANDOM-PASSWORD-HERE';
+
+function out(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
+
+function doPost(e) {
+  let d;
+  try { d = JSON.parse(e.postData.contents); } catch (err) { return ContentService.createTextOutput('bad request'); }
+  if (d.secret !== SECRET) return ContentService.createTextOutput('forbidden');
+  try {
+    if (d.action === 'send') {
+      GmailApp.sendEmail(d.to, d.subject || 'הודעה', d.body || '');
+      return ContentService.createTextOutput('ok');
+    }
+    if (d.action === 'search') {
+      const th = GmailApp.search(d.query || 'in:inbox', 0, Math.min(d.max || 5, 10));
+      return out({ messages: th.map(function (t) {
+        const m = t.getMessages()[t.getMessageCount() - 1];
+        return { id: m.getId(), from: m.getFrom(), subject: m.getSubject(),
+          date: Utilities.formatDate(m.getDate(), Session.getScriptTimeZone(), 'dd/MM HH:mm'),
+          unread: m.isUnread(), snippet: m.getPlainBody().replace(/\\s+/g, ' ').substring(0, 150) };
+      }) });
+    }
+    if (d.action === 'read') {
+      const m = GmailApp.getMessageById(d.id);
+      return out({ from: m.getFrom(), subject: m.getSubject(), body: m.getPlainBody().replace(/\\s+/g, ' ').substring(0, 3000) });
+    }
+    if (d.action === 'find_contact') {
+      const found = {};
+      const q = String(d.name || '').toLowerCase();
+      GmailApp.search('from:' + d.name + ' OR to:' + d.name, 0, 10).forEach(function (t) {
+        t.getMessages().forEach(function (m) {
+          [m.getFrom(), m.getTo()].forEach(function (f) {
+            String(f).split(',').forEach(function (part) {
+              const mt = part.match(/^\\s*"?([^"<]*?)"?\\s*<([^>]+)>\\s*$/);
+              const nm = mt ? mt[1].trim() : '';
+              const em = mt ? mt[2].trim() : part.trim();
+              if (em.indexOf('@') > 0 && (nm.toLowerCase().indexOf(q) >= 0 || em.toLowerCase().indexOf(q) >= 0)) found[em] = nm || em;
+            });
+          });
+        });
+      });
+      return out({ contacts: Object.keys(found).slice(0, 5).map(function (em) { return { name: found[em], email: em }; }) });
+    }
+    return out({ error: 'unknown action' });
+  } catch (err) { return out({ error: String(err) }); }
+}
+"""
+
+
+@app.route("/admin/api/mail_script")
+@admin_required
+def admin_mail_script():
+    return Response(MAIL_SCRIPT, mimetype="text/plain")
+
+
 @app.route("/admin/api/caller/<phone>", methods=["GET"])
 @admin_required
 def admin_caller_detail(phone):
@@ -2401,50 +2760,54 @@ def admin_caller_detail(phone):
         return jsonify({"error": "מספר טלפון לא תקין"}), 400
     db_load_caller(phone)
     profile = dict(caller(phone))
+    transcripts, alerts, db_error = [], [], ""
     conn = db_connect()
     if conn is None:
-        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
-    try:
-        with conn.cursor() as cur:
-            db_ensure_profile_columns(conn)
-            cur.execute(
-                """SELECT id, call_id, caller_name, created_at, heard, answer
-                   FROM call_transcripts WHERE phone=%s
-                   ORDER BY created_at DESC, id DESC LIMIT 200""", (phone,))
-            transcripts = cur.fetchall()
-            cur.execute(
-                """SELECT id, kind, message, created_at FROM admin_notifications
-                   WHERE phone=%s AND resolved_at IS NULL
-                   ORDER BY created_at DESC LIMIT 50""", (phone,))
-            alerts = cur.fetchall()
-        conn.commit()  # Persist additive profile migration.
-        return jsonify({
-            "profile": {
-                "phone": phone, "name": profile.get("name", ""),
-                "assigned_address": profile.get("assigned_address", ""),
-                "email_address": profile.get("email_address", ""),
-                "email_enabled": bool(profile.get("email_enabled")),
-                "chat_enabled": bool(profile.get("chat_enabled")),
-                "assistant_mode": profile.get("assistant_mode", "smart"),
-                "tools_enabled": bool(profile.get("tools_enabled", True)),
-                "history_enabled": bool(profile.get("history_enabled", True)),
-                "enabled": bool(profile.get("enabled", True))
-            },
-            "transcripts": [
-                {"id": r[0], "call_id": r[1], "name": r[2] or "",
-                 "created_at": r[3].isoformat(), "heard": r[4] or "", "answer": r[5] or ""}
-                for r in transcripts
-            ],
-            "alerts": [
-                {"id": r[0], "kind": r[1], "message": r[2], "created_at": r[3].isoformat()}
-                for r in alerts
-            ]
-        })
-    except Exception as e:
-        print("caller detail failed:", redact(e), flush=True)
-        return jsonify({"error": "לא ניתן לטעון את תיק המשתמש כרגע"}), 500
-    finally:
-        conn.close()
+        db_error = "מסד הנתונים אינו מחובר, ולכן תמלולי שיחות לא נשמרים לצמיתות"
+    else:
+        try:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute(
+                    """SELECT id, call_id, caller_name, created_at, heard, answer
+                       FROM call_transcripts WHERE phone=%s
+                       ORDER BY created_at DESC, id DESC LIMIT 200""", (phone,))
+                transcripts = [{"id": r[0], "call_id": r[1], "name": r[2] or "",
+                                "created_at": r[3].isoformat(), "heard": r[4] or "", "answer": r[5] or ""}
+                               for r in cur.fetchall()]
+                cur.execute(
+                    """SELECT id, kind, message, created_at FROM admin_notifications
+                       WHERE phone=%s AND resolved_at IS NULL
+                       ORDER BY created_at DESC LIMIT 50""", (phone,))
+                alerts = [{"id": r[0], "kind": r[1], "message": r[2], "created_at": r[3].isoformat()} for r in cur.fetchall()]
+            conn.commit()
+        except Exception as e:
+            print("caller detail failed:", redact(e), flush=True)
+            db_error = "לא ניתן לטעון את התמלולים כרגע"
+        finally:
+            conn.close()
+    errors = [{"t": e["t"], "kind": e.get("kind", ""), "err": e.get("err", "")}
+              for e in events if e.get("phone") == phone and not e.get("ok")][:30]
+    key_state = "personal" if all_keys().get(phone) else ("pool" if key_pool_has(phone) else "shared")
+    own = own_mail(phone)
+    return jsonify({
+        "profile": {
+            "phone": phone, "name": profile.get("name", ""),
+            "assigned_address": profile.get("assigned_address", ""),
+            "email_address": profile.get("email_address", ""),
+            "email_enabled": bool(profile.get("email_enabled")),
+            "chat_enabled": bool(profile.get("chat_enabled")),
+            "assistant_mode": profile.get("assistant_mode", "smart"),
+            "tools_enabled": bool(profile.get("tools_enabled", True)),
+            "history_enabled": bool(profile.get("history_enabled", True)),
+            "enabled": bool(profile.get("enabled", True)),
+            "key_state": key_state,
+            "key_mask": key_mask(all_keys().get(phone, "")),
+            "mail_own": bool(own),
+            "mail_global": bool(EMAIL_ENABLED and phone_allowed(phone)),
+        },
+        "transcripts": transcripts, "alerts": alerts, "errors": errors, "db_error": db_error,
+    })
 
 
 @app.route("/admin/api/caller/<phone>", methods=["DELETE"])
