@@ -464,6 +464,8 @@ _caller_loaded = set()
 
 
 _db_ready = False
+_db_down_until = 0.0  # אחרי כשל חיבור לא מנסים שוב כמה שניות, כדי שלא לתקוע שיחות
+_made_dirs = set()    # תיקיות ימות שכבר נוצרו בתהליך הזה
 
 
 def db_init(conn):
@@ -509,11 +511,15 @@ def db_init(conn):
 
 def db_connect():
     global _db_ready
+    global _db_down_until
     if not DATABASE_URL or psycopg is None:
         return None
+    if time.time() < _db_down_until:
+        return None
     try:
-        conn = psycopg.connect(DATABASE_URL, connect_timeout=15)
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=5)
     except Exception as e:
+        _db_down_until = time.time() + 20
         print("database connection failed:", redact(e), flush=True)
         return None
     if not _db_ready:
@@ -615,6 +621,8 @@ def db_resolve_notification(notification_id):
 
 def db_ensure_profile_columns(conn):
     """Additive profile migration; safe to run against existing installations."""
+    if _db_ready:
+        return  # כבר בוצע בהפעלה הראשונה של החיבור
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS assigned_address TEXT NOT NULL DEFAULT ''")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS email_address TEXT NOT NULL DEFAULT ''")
@@ -723,6 +731,8 @@ def db_load_caller(phone):
 
 def db_ensure_transcript_columns(conn):
     """Add assistant separation without deleting or rewriting existing transcripts."""
+    if _db_ready:
+        return
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE call_transcripts ADD COLUMN IF NOT EXISTS assistant_mode TEXT NOT NULL DEFAULT 'smart'")
 
@@ -798,6 +808,9 @@ def archive_yemot_history(phone, assistant_mode, call_id, heard, answer, use_yid
         # Create each level explicitly; Ym_MakeDir is idempotent for existing folders.
         for part_count in range(1, len(folder.strip("/").split("/")) + 1):
             partial = "/" + "/".join(folder.strip("/").split("/")[:part_count])
+            if partial in _made_dirs:
+                continue
+            _made_dirs.add(partial)
             try:
                 requests.get("https://www.call2all.co.il/ym/api/Ym_MakeDir",
                              params={"token": token, "path": "ivr2:" + partial}, timeout=12)
@@ -2077,6 +2090,7 @@ ADMIN_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.htm
 _login_fails = collections.deque()
 _ip_fails = {}
 _personal_ip_fails = {}
+_personal_phone_fails = {}
 
 
 @app.after_request
@@ -2162,6 +2176,10 @@ def personal_login():
     _personal_ip_fails[ip] = attempts
     if len(attempts) >= 8:
         return jsonify({"error": "יותר מדי ניסיונות כניסה. נסה שוב בעוד כמה דקות"}), 429
+    pf = [t for t in _personal_phone_fails.get(phone, []) if now - t < 900]
+    _personal_phone_fails[phone] = pf
+    if len(pf) >= 6:
+        return jsonify({"error": "יותר מדי ניסיונות כניסה. נסה שוב בעוד כמה דקות"}), 429
     conn = db_connect()
     if conn is None:
         return jsonify({"error": "המערכת אינה זמינה כרגע"}), 503
@@ -2173,8 +2191,10 @@ def personal_login():
         conn.commit()  # Persist the additive profile migration.
         if not row or not row[0] or not row[1] or not verify_personal_pin(pin, row[0]):
             _personal_ip_fails[ip].append(now)
+            _personal_phone_fails[phone].append(now)
             return jsonify({"error": "מספר הטלפון או הקוד האישי שגויים"}), 401
         _personal_ip_fails.pop(ip, None)
+        _personal_phone_fails.pop(phone, None)
         session.clear()
         session["personal_phone"] = phone
         session.permanent = True
@@ -2225,6 +2245,10 @@ def personal_change_pin():
     d = request.get_json(silent=True) or {}
     old_pin = str(d.get("old_pin", ""))
     new_pin = str(d.get("new_pin", ""))
+    pf = [t for t in _personal_phone_fails.get(phone, []) if time.time() - t < 900]
+    _personal_phone_fails[phone] = pf
+    if len(pf) >= 6:
+        return jsonify({"error": "יותר מדי ניסיונות. נסה שוב בעוד כמה דקות"}), 429
     if not re.fullmatch(r"\d{6,12}", new_pin):
         return jsonify({"error": "הקוד החדש חייב להכיל 6 עד 12 ספרות"}), 400
     conn = db_connect()
@@ -2237,6 +2261,7 @@ def personal_change_pin():
                 cur.execute("SELECT pin_hash FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
                 row = cur.fetchone()
                 if not row or not row[0] or not verify_personal_pin(old_pin, row[0]):
+                    _personal_phone_fails[phone].append(time.time())
                     return jsonify({"error": "הקוד הנוכחי שגוי"}), 401
                 cur.execute("UPDATE caller_profiles SET pin_hash=%s, updated_at=now() WHERE phone=%s", (pin_hash_value(new_pin), phone))
         return jsonify({"ok": True})
