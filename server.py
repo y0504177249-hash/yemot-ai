@@ -3772,7 +3772,7 @@ def admin_audio_upload():
                     return jsonify({"error": "גודל הקבצים לאחר חילוץ חורג מ־100MB"}), 413
                 seen = set()
                 for entry in entries:
-                    path = entry.filename.replace("\\\\", "/")
+                    path = entry.filename.replace("\\", "/")
                     parts = path.split("/")
                     if path.startswith("/") or any(part == ".." for part in parts):
                         return jsonify({"error": "הארכיון מכיל נתיב קובץ לא תקין"}), 400
