@@ -9,6 +9,7 @@ ASSISTANT_MODULES = {
     "yiddish": "yiddish",
     "tools": "tools",
     "astrology": "astrology",
+    "central": "central",
 }
 
 def get_prompt(mode, yiddish=False):
