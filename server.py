@@ -2420,9 +2420,10 @@ def admin_transcripts():
                 params + [limit],
             )
             rows = cur.fetchall()
+        conn.commit()
         return jsonify({"items": [
             {"id": r[0], "call_id": r[1], "phone": r[2], "name": r[3],
-             "created_at": r[4].isoformat(), "heard": r[5], "answer": r[6]}
+             "created_at": r[4].isoformat(), "heard": r[5], "answer": r[6], "assistant_mode": r[7] or "smart"}
             for r in rows
         ]})
     except Exception as e:
