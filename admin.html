@@ -287,7 +287,8 @@
           ['yeshiva', '4. בסגנון ראש ישיבה'],
           ['yiddish', '5. משפיע באידיש'],
           ['tools', '6. כלי AI'],
-          ['central', '7. עוזר AI מרכזי']
+          ['astrology', '7. מפת האישיות'],
+          ['central', '8. עוזר AI מרכזי']
         ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
       );
       var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
