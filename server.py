@@ -2580,6 +2580,7 @@ def _pa_handle(st, mode, val, call_id, phone):
 def ivr():
     p = request.values
     call_id = p.get("ApiCallId", "unknown")
+    _tls.call_id = call_id
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
