@@ -3775,7 +3775,7 @@ def admin_audio_list():
             36: "הבדיקה הצליחה", 37: "הבדיקה נכשלה"
         }
         def audio_item(r):
-            match = re.match(r"^(\\d{2})-", str(r[0]))
+            match = re.match(r"^(\d{2})-", str(r[0]))
             number = int(match.group(1)) if match else None
             label = audio_labels.get(number) if number is not None else None
             if not label:
