@@ -476,6 +476,12 @@ def ping():
     return "ok"
 
 
+@app.route("/")
+def home():
+    # Render's base URL should open the admin UI instead of returning a 404.
+    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html"), mimetype="text/html")
+
+
 # היסטוריית שיחה (טקסט בלבד) ומצב עיבוד, לפי מזהה שיחה
 histories = {}
 calls = {}  # call_id -> {"turn": int, "last": str, "status": "idle|processing", "answer": str, "t": float}
