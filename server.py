@@ -744,6 +744,7 @@ def db_admin_recent_transcripts(limit=5):
                 (max(1, min(int(limit), 10)),),
             )
             rows = cur.fetchall()
+        conn.commit()
         return [{"phone": r[0] or "", "name": r[1] or "", "heard": r[2] or "",
                  "answer": r[3] or "", "created_at": r[4].strftime("%d/%m %H:%M") if r[4] else "",
                  "assistant_mode": r[5] or "smart"}
