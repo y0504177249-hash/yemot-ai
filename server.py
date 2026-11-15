@@ -1312,8 +1312,10 @@ MODE_TTS_STYLES = {
     "psychologist": "A warm, soft, gentle female therapist voice: slow, calm, reassuring, with empathic pauses and a caring tone, speaking Hebrew.",
     "yeshiva": "An elderly, wise, fatherly rosh yeshiva voice: deep, calm, thoughtful and warm, measured pace, with traditional yeshiva intonation, speaking Hebrew.",
     "tools": "A clear, efficient, friendly and neutral voice at a natural pace, speaking Hebrew.",
+    "astrology": "A calm, intriguing, thoughtful Hebrew voice with a measured pace, clear pronunciation, and a subtle sense of wonder; grounded and informative, never mystical or theatrical.",
+    "personal": "A warm, clear, respectful Hebrew voice, calm and welcoming, with a natural conversational pace.",
 }
-MODE_VOICES = {"smart": "Sulafat", "edgy": "Puck", "psychologist": "Vindemiatrix", "yeshiva": "Charon", "yiddish": "Schedar", "tools": "Kore", "personal": "Sulafat"}
+MODE_VOICES = {"smart": "Sulafat", "edgy": "Puck", "psychologist": "Vindemiatrix", "yeshiva": "Charon", "yiddish": "Schedar", "tools": "Kore", "astrology": "Algieba", "personal": "Achird"}
 
 
 def voice_index_for(phone, mode=""):
