@@ -2401,6 +2401,7 @@ def admin_transcripts():
     if conn is None:
         return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
     try:
+        db_ensure_transcript_columns(conn)
         clauses, params = [], []
         if phone:
             clauses.append("phone = %s"); params.append(phone)
