@@ -2105,12 +2105,12 @@ def main_menu_text(message=""):
     prefix = (message + ". ") if message else ""
     return (
         prefix + "ברוכים הבאים למערכת הבינה. "
-        "לעוזר הבינה המרכזי הקש אפס. "
-        "לתפריט כל סוגי הבינות הקש אחת. "
-        "לכלי איי איי הקש שתיים. "
+        "לתפריט העוזרים הקש אחת. "
+        "לתפריט כלי הבינה המלאכותית הקש שתיים. "
         "לכלים שימושיים הקש שלוש. "
-        "לאזור האישי ולניהול הקש ארבע. "
-        "לפורום הקולי בעיוות קול הקש חמש. "
+        "לאזור האישי הקש ארבע. "
+        "לניהול המערכת הקש חמש. "
+        "לעוזר המרכזי עם גישה לכל הכלים הקש אפס. "
         "לשמיעת התפריט מחדש הקש תשע."
     )
 
@@ -2146,13 +2146,20 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 return _digits(st, utilities_menu_text())
             if val == "4":
                 st["menu_stage"] = "personal"
-                st["pa_mode"] = "code" if admin_phone_ok(phone) else "menu"
+                st["pa_mode"] = "menu"
                 st["is_admin"] = False
                 return phone_area(st, p, call_id, phone, recorded)
             if val == "5":
-                st["menu_stage"] = "forum"
-                st["forum_stage"] = "menu"
-                return _digits(st, forum_menu_text())
+                st["menu_stage"] = "personal"
+                st["is_admin"] = False
+                if not admin_phone_ok(phone):
+                    st["menu_stage"] = "root"
+                    return _digits(st, main_menu_text("אין הרשאה להיכנס לניהול"))
+                if admin_locked(phone):
+                    st["menu_stage"] = "root"
+                    return _digits(st, main_menu_text("הגישה לניהול נעולה זמנית לאחר ניסיונות כושלים"))
+                st["pa_mode"] = "code"
+                return phone_area(st, p, call_id, phone, recorded)
             if val == "0":
                 st["selected_assistant_mode"] = "central"
                 st["menu_stage"] = "assistant_chat"
@@ -2164,7 +2171,7 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 st["turn"] += 1
                 return Response(
                     read_command(
-                        "ברוכים הבאים לעוזר הבינה המרכזי. אפשר לשאול כל שאלה או לבקש עזרה. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
+                        "ברוכים הבאים לעוזר הבינה המרכזי, עם גישה לכלי הבינה הזמינים עבורך. אפשר לשאול כל שאלה או לבקש לבצע משימה. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
                         call_id, st["turn"],
                     ),
                     mimetype="text/plain",
@@ -2441,8 +2448,6 @@ def personal_menu_text(phone, message=""):
     text = (prefix + "האזור האישי" + (" של " + name if name else "") + ". "
             "לשמיעת פרטי הפרופיל שלך הקש 1. להחלפת הקול שלך הקש 2. לעדכון השם שלך הקש 3. "
             "להפעלה או כיבוי של שמירת היסטוריית השיחות הקש 4. לשמיעת השיחה האחרונה שלך הקש 5. ")
-    if admin_phone_ok(phone):
-        text += "לניהול המערכת הקש 9. "
     return text + ("לחזרה לתפריט הראשי הקש 0." if calls.get(getattr(_tls, "call_id", ""), {}).get("main_menu") else "לשמיעה חוזרת הקש 0.")
 
 
@@ -2568,12 +2573,6 @@ def _pa_handle(st, mode, val, call_id, phone):
                 msg = f"בשיחה האחרונה אמרת: {clean_for_tts(heard)[:200]}. ועניתי: {clean_for_tts(answer)[:250]}"
             else:
                 msg = "אין שיחות שמורות"
-        elif val == "9" and admin_phone_ok(phone):
-            if admin_locked(phone):
-                msg = "יותר מדי ניסיונות. נסה מאוחר יותר"
-            else:
-                st["pa_mode"] = "code"
-                return _digits(st, "הקש את קוד הניהול", 12, 1)
         elif val not in ("", "0"):
             msg = "לא זיהיתי את הבחירה"
         return _digits(st, personal_menu_text(phone, msg))
