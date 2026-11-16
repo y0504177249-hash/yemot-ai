@@ -558,6 +558,47 @@ def db_connect():
     return conn
 
 
+def validate_gemini_key_pool(conn):
+    """Read-only check that the configured Fernet key can decrypt every stored Gemini key."""
+    try:
+        cipher = _fernet()
+    except Exception as e:
+        print(
+            f"Gemini key pool decryption check: invalid encryption key format ({type(e).__name__})",
+            flush=True,
+        )
+        return
+    if cipher is None:
+        print("Gemini key pool decryption check: skipped (encryption key missing)", flush=True)
+        return
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT encrypted_key FROM gemini_key_pool ORDER BY id")
+            rows = cur.fetchall()
+    except Exception as e:
+        print(f"Gemini key pool decryption check: database read failed ({type(e).__name__})", flush=True)
+        return
+
+    passed = 0
+    failed = 0
+    invalid_tokens = 0
+    for (encrypted,) in rows:
+        try:
+            cipher.decrypt(str(encrypted).encode("ascii"))
+            passed += 1
+        except Exception as e:
+            failed += 1
+            if type(e).__name__ == "InvalidToken":
+                invalid_tokens += 1
+
+    print(
+        f"Gemini key pool decryption check: {passed}/{len(rows)} passed; "
+        f"{failed} failed (InvalidToken={invalid_tokens})",
+        flush=True,
+    )
+
+
 def db_notify_key_pool_empty(phone):
     conn = db_connect()
     if conn is None:
@@ -3798,7 +3839,10 @@ def admin_reset_quota():
 # forum table) while preserving all existing rows.
 _startup_db_conn = db_connect()
 if _startup_db_conn is not None:
-    _startup_db_conn.close()
+    try:
+        validate_gemini_key_pool(_startup_db_conn)
+    finally:
+        _startup_db_conn.close()
 
 maybe_refresh()
 
