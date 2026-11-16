@@ -1220,10 +1220,13 @@ def download_recording(path):
         raise RuntimeError("Yemot returned an empty recording")
     return r.content
 
+# Keep only known current fallback IDs; the old gemini-3.8-flash-lite ID
+# returned 404 and must not be retried, even if it remains in an env override.
+_UNAVAILABLE_FALLBACK_MODELS = {"gemini-3.8-flash-lite"}
 FALLBACK_MODELS = [
     x.strip()
-    for x in os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-3.8-flash-lite,gemini-3.5-flash-lite,gemini-3.5-flash").split(",")
-    if x.strip()
+    for x in os.environ.get("GEMINI_FALLBACK_MODELS", "gemini-3.5-flash-lite,gemini-3.5-flash").split(",")
+    if x.strip() and x.strip() not in _UNAVAILABLE_FALLBACK_MODELS
 ]
 _bad_models = {}  # שם מודל -> זמן (epoch) שעד אליו מדלגים עליו
 _discovered = {"done": False, "names": []}
@@ -1326,8 +1329,10 @@ MODE_TTS_STYLES = {
     "psychologist": "A warm, soft, gentle female therapist voice: slow, calm, reassuring, with empathic pauses and a caring tone, speaking Hebrew.",
     "yeshiva": "An elderly, wise, fatherly rosh yeshiva voice: deep, calm, thoughtful and warm, measured pace, with traditional yeshiva intonation, speaking Hebrew.",
     "tools": "A clear, efficient, friendly and neutral voice at a natural pace, speaking Hebrew.",
+    "astrology": "A calm, intriguing, thoughtful Hebrew voice with a measured pace, clear pronunciation, and a subtle sense of wonder; grounded and informative, never mystical or theatrical.",
+    "personal": "A warm, clear, respectful Hebrew voice, calm and welcoming, with a natural conversational pace.",
 }
-MODE_VOICES = {"smart": "Sulafat", "edgy": "Puck", "psychologist": "Vindemiatrix", "yeshiva": "Charon", "yiddish": "Schedar", "tools": "Kore", "personal": "Sulafat"}
+MODE_VOICES = {"smart": "Sulafat", "edgy": "Puck", "psychologist": "Vindemiatrix", "yeshiva": "Charon", "yiddish": "Schedar", "tools": "Kore", "astrology": "Algieba", "personal": "Achird"}
 
 
 def voice_index_for(phone, mode=""):
@@ -3989,6 +3994,13 @@ def admin_reset_quota():
     _bad_reason.clear()
     return jsonify({"ok": True})
 
+
+# Run additive schema setup during startup rather than waiting for the first
+# caller request. This creates missing tables/columns (including the voice
+# forum table) while preserving all existing rows.
+_startup_db_conn = db_connect()
+if _startup_db_conn is not None:
+    _startup_db_conn.close()
 
 maybe_refresh()
 
