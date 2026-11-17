@@ -2806,11 +2806,13 @@ def ivr():
     maybe_refresh()
     db_load_caller(phone)
     assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if use_yiddish else "smart"))
-    if requested_mode == "menu":
-        assistant_mode = "menu"
-    elif api_ext == "0" and requested_mode != "personal":
-        assistant_mode = "central"
-    elif api_ext in ("", "8", "1/1") and requested_mode != "personal":
+    # All phone entry extensions converge on the single main menu (extension 8).
+    # The menu's internal keypad choices route to assistants, tools, utilities,
+    # personal area, management, forum, and conversation resume.
+    # Keep the explicit personal mode for the authenticated admin web/phone flow.
+    if requested_mode == "personal":
+        assistant_mode = "personal"
+    else:
         assistant_mode = "menu"
 
     if p.get("hangup") == "yes":
