@@ -379,15 +379,8 @@
       );
       var history = h('section', null,
         h('h2', null, 'שיחות ותמלולים'),
-        h('p', { class: 'sub' }, 'מוצגות עד 200 שיחות אחרונות של מספר זה.'),
-        data.transcripts && data.transcripts.length ? data.transcripts.map(function (t) {
-          return h('article', { class: 'line' },
-            h('span', { class: 'lamp ok' }),
-            h('div', null,
-              h('div', { class: 'ident' }, h('strong', null, new Date(t.created_at).toLocaleString('he-IL'))),
-              h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המשתמש: ' + t.heard),
-              h('p', { style: 'margin-top:6px; white-space:pre-wrap' }, 'העוזר: ' + t.answer)));
-        }) : h('p', { class: 'sub' }, 'עדיין אין תמלולי שיחות למספר הזה.')
+        h('p', { class: 'sub' }, 'כל שיחה מוצגת כרצף אחד, לפי סדר ההודעות. מוצגות ההודעות האחרונות של מספר זה.'),
+        data.transcripts && data.transcripts.length ? groupCalls(data.transcripts).map(function (c) { return conversationCard(c, false); }) : h('p', { class: 'sub' }, 'עדיין אין תמלולי שיחות למספר הזה.')
       );
       app.replaceChildren(header(),
         h('div', { class: 'bar' }, h('button', { class: 'quiet', onclick: load }, 'חזרה לניהול הראשי')),
@@ -524,6 +517,56 @@
   }
 
   /* ---------- ארכיון תמלולים ---------- */
+  /* ---------- שיחות כרצף ---------- */
+  var MODE_LABELS = {
+    central: 'העוזר המרכזי', smart: 'הבינה החכמה', edgy: 'הבינה הישירה',
+    psychologist: 'שיחה והקשבה', yeshiva: 'בינת הישיבה', yiddish: 'ביידיש',
+    tools: 'כלי AI', astrology: 'מפת האישיות'
+  };
+  // מקבץ הודעות לפי שיחה: כל שיחה ברצף אחד, מהראשונה לאחרונה, והשיחות מהחדשה לישנה
+  function groupCalls(items) {
+    var map = {}, order = [];
+    items.forEach(function (t) {
+      var key = (t.call_id || ('id' + t.id)) + '|' + (t.phone || '');
+      if (!map[key]) { map[key] = { phone: t.phone || '', name: t.name || '', msgs: [] }; order.push(key); }
+      if (!map[key].name && t.name) map[key].name = t.name;
+      map[key].msgs.push(t);
+    });
+    var calls = order.map(function (k) {
+      var c = map[k];
+      c.msgs.sort(function (a, b) { return new Date(a.created_at) - new Date(b.created_at) || (a.id || 0) - (b.id || 0); });
+      c.start = c.msgs[0].created_at;
+      c.end = c.msgs[c.msgs.length - 1].created_at;
+      return c;
+    });
+    calls.sort(function (a, b) { return new Date(b.end) - new Date(a.end); });
+    return calls;
+  }
+  function conversationCard(c, showWho) {
+    var modes = [];
+    c.msgs.forEach(function (m) { var l = MODE_LABELS[m.assistant_mode] || m.assistant_mode; if (l && modes.indexOf(l) < 0) modes.push(l); });
+    var last = null;
+    var body = c.msgs.map(function (m, i) {
+      var parts = [];
+      var lab = MODE_LABELS[m.assistant_mode] || m.assistant_mode || '';
+      if (lab && lab !== last && (i > 0 || modes.length > 1)) parts.push(h('div', { class: 'sub' }, '— ' + lab + ' —'));
+      last = lab;
+      parts.push(h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המתקשר: ' + m.heard));
+      parts.push(h('p', { style: 'margin-top:4px; white-space:pre-wrap' }, 'העוזר: ' + m.answer));
+      return h('div', { style: 'margin-top:6px' }, parts);
+    });
+    var when = new Date(c.start).toLocaleString('he-IL') + (c.msgs.length > 1 ? ' עד ' + new Date(c.end).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '');
+    return h('article', { class: 'line' },
+      h('span', { class: 'lamp ok', 'aria-hidden': 'true' }),
+      h('div', null,
+        h('div', { class: 'ident' },
+          showWho ? h('strong', null, c.name || 'ללא שם') : null,
+          showWho ? h('span', { class: 'num' }, c.phone) : null,
+          h('span', { class: 'sub' }, when)),
+        h('div', { class: 'sub' }, c.msgs.length + ' הודעות' + (modes.length ? ' · ' + modes.join(', ') : '')),
+        body));
+  }
+
   function transcriptsPanel() {
     var phone = h('input', { type: 'text', placeholder: 'מספר טלפון', inputmode: 'numeric' });
     var name = h('input', { type: 'text', placeholder: 'שם מתקשר' });
@@ -558,21 +601,7 @@
       api('GET', 'transcripts?' + q.toString()).then(function (data) {
         results.replaceChildren();
         if (!data.items.length) { results.append(h('p', { class: 'sub' }, 'לא נמצאו תמלולים מתאימים.')); return; }
-        data.items.forEach(function (item) {
-          var date = new Date(item.created_at).toLocaleString('he-IL');
-          var modeLabel = modeLabels[item.assistant_mode] || item.assistant_mode || 'לא ידוע';
-          results.append(h('article', { class: 'line' },
-            h('span', { class: 'lamp ok', 'aria-hidden': 'true' }),
-            h('div', null,
-              h('div', { class: 'ident' },
-                h('strong', null, item.name || 'ללא שם'),
-                h('span', { class: 'num' }, item.phone),
-                h('span', { class: 'sub' }, date)),
-              h('div', { class: 'sub' }, 'סוג עוזר: ' + modeLabel),
-              h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המתקשר: ' + item.heard),
-              h('p', { style: 'margin-top:6px; white-space:pre-wrap' }, 'העוזר: ' + item.answer)
-            )));
-        });
+        groupCalls(data.items).forEach(function (c) { results.append(conversationCard(c, true)); });
       }).catch(function (e) {
         results.replaceChildren(h('p', { class: 'note bad' }, e.message));
       });
