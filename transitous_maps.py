@@ -2,7 +2,7 @@
 
 Transitous is best-effort and permits only open-source, non-commercial, light use.
 The application sends a descriptive User-Agent and limits plan calls to 600 per rolling
-24 hours. Geocoding uses the public Nominatim service with caching and <=1 request/sec.
+24 hours. Geocoding uses Transitous /api/v1/geocode only for submitted requests and caches results for seven days; it does not use autocomplete.
 """
 import os
 import time
@@ -15,7 +15,6 @@ from urllib.parse import urlencode
 import requests
 
 TRANSITOUS_PLAN_URL = "https://api.transitous.org/api/v6/plan"
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 APP_CONTACT = "https://yemot-smart-search.onrender.com"
 APP_USER_AGENT = "YemotSmartSearch/1.0 (" + APP_CONTACT + ")"
 TRANSITOUS_DAILY_LIMIT = 600  # below Transitous' 720 requests / 24h coordination threshold
@@ -25,8 +24,6 @@ _lock = threading.Lock()
 _usage_times = deque()
 _geocode_cache = {}
 _route_cache = {}
-_nominatim_lock = threading.Lock()
-_last_nominatim_request = 0.0
 
 
 def _reserve_plan_request():
@@ -68,7 +65,7 @@ def _reserve_plan_request():
 
 
 def _geocode(place):
-    global _last_nominatim_request
+    """Resolve one user-submitted place through Transitous; no autocomplete or third-party geocoder."""
     key = " ".join(str(place or "").strip().split()).casefold()
     if not key:
         return None
@@ -77,31 +74,29 @@ def _geocode(place):
         cached = _geocode_cache.get(key)
         if cached and cached[0] > now:
             return cached[1]
-    # Public Nominatim policy: no more than one request per second.
-    with _nominatim_lock:
-        wait = 1.05 - (time.monotonic() - _last_nominatim_request)
-        if wait > 0:
-            time.sleep(wait)
-        response = requests.get(
-            NOMINATIM_URL,
-            params={"q": place, "format": "jsonv2", "limit": 1, "addressdetails": 0},
-            headers={"User-Agent": APP_USER_AGENT, "Accept-Language": "he,en"},
-            timeout=15,
-        )
-        _last_nominatim_request = time.monotonic()
-        response.raise_for_status()
-        results = response.json()
+    response = requests.get(
+        "https://api.transitous.org/api/v1/geocode",
+        params={"text": place, "language": "he", "type": "ADDRESS,PLACE,STOP", "numResults": 5},
+        headers={"User-Agent": APP_USER_AGENT, "Accept": "application/json"},
+        timeout=18,
+    )
+    response.raise_for_status()
+    results = response.json()
     if not results:
         return None
+    # Prefer the strongest match; if Israel is among the candidates, prefer it.
+    israel = [item for item in results if str(item.get("country") or "").upper() == "IL"]
+    candidates = israel or results
+    best = max(candidates, key=lambda item: float(item.get("score") or 0))
     result = {
-        "lat": float(results[0]["lat"]),
-        "lon": float(results[0]["lon"]),
-        "label": str(results[0].get("display_name") or place),
+        "lat": float(best["lat"]),
+        "lon": float(best["lon"]),
+        "label": str(best.get("name") or place),
+        "id": str(best.get("id") or ""),
     }
     with _lock:
         _geocode_cache[key] = (now + 7 * 86400, result)
     return result
-
 
 def _iso(value):
     if not value:
