@@ -241,10 +241,15 @@ def register(app, admin_required, tts, flask, on_complete=None, load_archive=Non
     @app.route("/admin/api/voicepack/zip")
     @admin_required
     def voicepack_zip():
-        data = build_zip()
-        if status()["created"] == 0 and load_archive:
-            saved = load_archive()
-            if saved and saved.get("archive"):
-                data = saved["archive"]
+        current = status()
+        if current["running"]:
+            return jsonify({"error": "היצירה עדיין פועלת. המתן לסיום ואז הורד את החבילה."}), 409
+        if current["created"] == 0:
+            saved = load_archive() if load_archive else None
+            if not saved or not saved.get("archive") or not (saved.get("status") or {}).get("created", 0):
+                return jsonify({"error": "עדיין לא נוצרו קובצי שמע. הפעל תחילה את יצירת ההקראות."}), 409
+            data = saved["archive"]
+        else:
+            data = build_zip()
         return Response(data, mimetype="application/zip",
                         headers={"Content-Disposition": "attachment; filename=yemot-voicepack.zip"})
