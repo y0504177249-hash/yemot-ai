@@ -2251,6 +2251,8 @@ def return_to_main_menu(st):
     st.pop("tools_action", None)
     st.pop("tools_prompt", None)
     st.pop("utility_action", None)
+    st.pop("tool_clarifications_done", None)
+    st.pop("tool_clarification_waiting", None)
     st["turn"] += 1
     return _digits(st, main_menu_text())
 
@@ -2283,9 +2285,32 @@ def tools_area(st, p, call_id, phone, recorded, use_yiddish):
         if st.get("status") == "done":
             audio = st.get("audio")
             st["status"] = "idle"
+            if st.get("tool_clarification_waiting"):
+                st["tool_clarification_waiting"] = False
+                st["tools_recording"] = True
+                st["last"] = None
+                st["turn"] += 1
+                return Response(
+                    read_command(st.get("answer") or "ענה בבקשה על שאלת המיקוד.", call_id, st["turn"]),
+                    mimetype="text/plain",
+                )
+            if st.get("tools_action") == "utility_map":
+                st["menu_stage"] = "utilities"
+                st["tools_busy"] = False
+                st["tools_recording"] = False
+                st.pop("tools_action", None)
+                st.pop("tools_prompt", None)
+                st.pop("tool_clarifications_done", None)
+                if audio:
+                    return Response(
+                        f"id_list_message=f-{audio}&go_to_folder={active_extension_path()}",
+                        mimetype="text/plain",
+                    )
+                return _digits(st, utilities_menu_text())
             st["tools_busy"] = False
             st.pop("tools_action", None)
             st.pop("tools_prompt", None)
+            st.pop("tool_clarifications_done", None)
             if audio:
                 return Response(
                     f"id_list_message=f-{audio}&go_to_folder={active_extension_path()}",
@@ -2318,6 +2343,8 @@ def tools_area(st, p, call_id, phone, recorded, use_yiddish):
         st["tools_prompt"] = prompt
         st["tools_busy"] = True
         st["tools_recording"] = True
+        st["tool_clarifications_done"] = False
+        st["tool_clarification_waiting"] = False
         st["turn"] += 1
         return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
 
@@ -2510,7 +2537,8 @@ def utilities_menu_text(message=""):
         prefix + "תפריט כלים שימושיים. "
         "לבדיקת מזג אוויר הקש אחת. לחישוב הקש שתיים. "
         "להמרת יחידות ומטבעות הקש שלוש. לתרגום הקש ארבע. "
-        "לחיפוש מהיר הקש חמש. לחזרה לתפריט הראשי הקש אפס. "
+        "לחיפוש מהיר הקש חמש. למפות ולתכנון מסלול הקש שש. "
+        "לחזרה לתפריט הראשי הקש אפס. "
         "לחזרה לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית."
     )
 
@@ -2521,6 +2549,7 @@ UTILITY_ACTIONS = {
     "3": ("utility_conversion", "המרת יחידות ומטבעות", "אמור מה להמיר, מאיזו יחידה או מטבע ולאיזו יחידה או מטבע."),
     "4": ("utility_translation", "תרגום", "אמור את הטקסט ואת שפת היעד לתרגום."),
     "5": ("utility_research", "חיפוש מהיר", "אמור מה תרצה לחפש ולבדוק."),
+    "6": ("utility_map", "מפות", "במשפט אחד אמור את המוצא, היעד, תאריך ושעת היציאה או ההגעה, והאם אתה מעדיף תחבורה ציבורית או הליכה ברגל."),
 }
 
 
@@ -2537,9 +2566,22 @@ def utilities_area(st, p, call_id):
         if not selected:
             return _digits(st, utilities_menu_text("לא זיהיתי את הבחירה"))
         action, label, prompt = selected
-        st["menu_stage"] = "utility_chat"
-        st["tools_chat"] = True
-        st["tools_action"] = action
+        if action == "utility_map":
+            # A one-shot route request, not a free-form tools chat.
+            st["menu_stage"] = "utility_map"
+            st["tools_chat"] = False
+            st["tools_busy"] = True
+            st["tools_recording"] = True
+            st["tools_action"] = action
+            st["tools_prompt"] = prompt
+            st["tool_clarifications_done"] = True
+            st["tool_clarification_waiting"] = False
+        else:
+            st["menu_stage"] = "utility_chat"
+            st["tools_chat"] = True
+            st["tools_action"] = action
+            st["tool_clarifications_done"] = False
+            st["tool_clarification_waiting"] = False
         st["last"] = None
         st["status"] = "idle"
         st["turn"] += 1
