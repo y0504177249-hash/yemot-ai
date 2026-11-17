@@ -2301,7 +2301,7 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 st["turn"] += 1
                 return Response(
                     read_command(
-                        "ברוכים הבאים לעוזר הבינה המרכזי, עם גישה לכלי הבינה הזמינים עבורך. אפשר לשאול כל שאלה או לבקש לבצע משימה. " + (st.get("previous_topic") and "בשיחה הקודמת שאלת: " + clean_for_tts(st.get("previous_topic", ""))[:100] + ". " if st.get("previous_topic") else "") + "כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
+                        "ברוכים הבאים לעוזר הבינה המרכזי, עם גישה לכלי הבינה הזמינים עבורך. אפשר לשאול כל שאלה או לבקש לבצע משימה. " + ("בשיחה הקודמת שאלת: " + clean_for_tts(st.get("previous_topic", ""))[:100] + ". " if st.get("previous_topic") else "") + "כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
                         call_id, st["turn"],
                     ),
                     mimetype="text/plain",
