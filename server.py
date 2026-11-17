@@ -28,6 +28,7 @@ from google import genai
 from google.genai import types
 from cryptography.fernet import Fernet
 from assistants import get_prompt as get_assistant_prompt
+from transitous_maps import compute_transitous_route
 try:
     from google.oauth2 import id_token as google_id_token
     from google.auth.transport import requests as google_auth_requests
@@ -1700,129 +1701,8 @@ def _map_local_datetime(value):
 
 
 def compute_map_route(map_request):
-    """Return verified, provider-calculated route steps; never improvise directions."""
-    if not GOOGLE_MAPS_ROUTES_ENABLED or not GOOGLE_MAPS_API_KEY:
-        return (
-            "כלי המפות עדיין לא הופעל. חישוב מסלולים משתמש ב-Google Maps Routes API ועלול להיות כרוך בתשלום. "
-            "כדי להפעיל אותו, מנהל המערכת צריך להגדיר GOOGLE_MAPS_API_KEY ולהפעיל במפורש "
-            "את GOOGLE_MAPS_ROUTES_ENABLED."
-        )
-    origin = str(map_request.get("origin") or "").strip()[:300]
-    destination = str(map_request.get("destination") or "").strip()[:300]
-    mode = str(map_request.get("travel_mode") or "").strip().upper()
-    time_kind = str(map_request.get("time_kind") or "").strip().lower()
-    if not origin or not destination or mode not in ("TRANSIT", "WALK") or time_kind not in ("departure", "arrival"):
-        return "חסרים פרטי מסלול. אמור במשפט אחד מוצא, יעד, שעת יציאה או הגעה, והאם לנסוע בתחבורה ציבורית או ללכת ברגל."
-    try:
-        requested_time = _map_local_datetime(map_request.get("time_value"))
-    except Exception:
-        return "לא הצלחתי להבין את מועד הנסיעה. אמור תאריך ושעה ברורים ליציאה או להגעה."
-    body = {
-        "origin": {"address": origin},
-        "destination": {"address": destination},
-        "travelMode": mode,
-        "languageCode": "he-IL",
-        "regionCode": "IL",
-        "units": "METRIC",
-        "computeAlternativeRoutes": False,
-    }
-    # Google transit routing supports either arrivalTime or departureTime.
-    # Walking duration is returned as a route estimate; arrival-time requests are
-    # converted to an estimated departure after the route duration is known.
-    if mode == "TRANSIT":
-        body["arrivalTime" if time_kind == "arrival" else "departureTime"] = requested_time.isoformat(timespec="seconds")
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
-        "X-Goog-FieldMask": (
-            "routes.duration,routes.distanceMeters,routes.localizedValues,"
-            "routes.legs.steps.navigationInstruction.instructions,"
-            "routes.legs.steps.travelMode,routes.legs.steps.localizedValues,"
-            "routes.legs.steps.transitDetails"
-        ),
-    }
-    try:
-        response = requests.post(
-            "https://routes.googleapis.com/directions/v2:computeRoutes",
-            json=body,
-            headers=headers,
-            timeout=25,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        routes = payload.get("routes") or []
-        if not routes:
-            return "לא נמצא מסלול מתאים בין המוצא ליעד בזמן שביקשת. בדוק את הכתובות או נסה שעה אחרת."
-        route = routes[0]
-        duration_raw = str(route.get("duration") or "")
-        duration_match = re.match(r"^(\d+(?:\.\d+)?)s$", duration_raw)
-        duration_seconds = int(float(duration_match.group(1))) if duration_match else 0
-        minutes = max(1, round(duration_seconds / 60)) if duration_seconds else 0
-        distance_m = int(route.get("distanceMeters") or 0)
-        distance_label = (f"{distance_m / 1000:.1f} קילומטרים" if distance_m >= 1000
-                          else (f"{distance_m} מטרים" if distance_m else "מרחק לא זמין"))
-        localized = route.get("localizedValues") or {}
-        duration_label = ((localized.get("duration") or {}).get("text") or
-                          (f"כ-{minutes} דקות" if minutes else "משך זמן לא זמין"))
-        steps = (route.get("legs") or [{}])[0].get("steps") or []
-        instructions = []
-        for step in steps:
-            transit = step.get("transitDetails") or {}
-            if transit:
-                line = transit.get("transitLine") or {}
-                stops = transit.get("stopDetails") or {}
-                departure_stop = (stops.get("departureStop") or {}).get("name") or "התחנה הקרובה"
-                arrival_stop = (stops.get("arrivalStop") or {}).get("name") or "תחנת היעד"
-                line_name = line.get("nameShort") or line.get("shortName") or line.get("name") or "תחבורה ציבורית"
-                vehicle = (line.get("vehicle") or {}).get("name") or ""
-                headsign = transit.get("headsign") or ""
-                detail = f"עלה על {vehicle + ' ' if vehicle else ''}{line_name} בתחנת {departure_stop}"
-                if headsign:
-                    detail += f", בכיוון {headsign}"
-                detail += f", ורד בתחנת {arrival_stop}"
-                instructions.append(detail)
-                continue
-            instruction = ((step.get("navigationInstruction") or {}).get("instructions") or "").strip()
-            if instruction:
-                instruction = re.sub(r"<[^>]*>", " ", instruction)
-                instruction = html_module.unescape(" ".join(instruction.split()))
-                localized_step = step.get("localizedValues") or {}
-                step_distance = (localized_step.get("distance") or {}).get("text")
-                if step_distance:
-                    instruction += f" ({step_distance})"
-                instructions.append(instruction)
-        if not instructions:
-            return "שירות המפות מצא מסלול אך לא החזיר הוראות מפורטות. נסה שוב מאוחר יותר."
-        if mode == "WALK" and duration_seconds:
-            if time_kind == "arrival":
-                departure = requested_time - timedelta(seconds=duration_seconds)
-                time_line = f"כדי להגיע בסביבות {requested_time.strftime('%H:%M')}, צא להליכה בסביבות {departure.strftime('%H:%M')}."
-            else:
-                arrival = requested_time + timedelta(seconds=duration_seconds)
-                time_line = f"צא להליכה בשעה {requested_time.strftime('%H:%M')}; ההגעה המשוערת היא בסביבות {arrival.strftime('%H:%M')}."
-        elif time_kind == "departure":
-            time_line = f"שעת היציאה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
-        else:
-            time_line = f"שעת ההגעה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
-        mode_label = "תחבורה ציבורית" if mode == "TRANSIT" else "הליכה ברגל"
-        steps = instructions[:14]
-        numbered = " ".join(f"שלב {i + 1}: {item}." for i, item in enumerate(steps))
-        return (
-            f"מצאתי מסלול מ{origin} אל {destination}, באמצעות {mode_label}. "
-            f"{time_line} משך משוער {duration_label}, מרחק {distance_label}. "
-            f"ההדרכה לפי הסדר: {numbered}"
-        )
-    except requests.HTTPError as e:
-        status = getattr(getattr(e, "response", None), "status_code", 0)
-        print("Google Maps route request failed:", status, flush=True)
-        if status in (400, 404):
-            return "לא הצלחתי לחשב את המסלול. בדוק את שמות המקומות, התאריך והשעה."
-        if status in (401, 403):
-            return "שירות המפות אינו מאושר לשימוש במפתח שהוגדר. מנהל המערכת צריך לבדוק את הרשאת Routes API."
-        return "שירות המפות אינו זמין כרגע. נסה שוב מאוחר יותר."
-    except Exception as e:
-        print("map route calculation failed:", redact(e)[:180], flush=True)
-        return "לא הצלחתי לחשב את המסלול כרגע. נסה שוב מאוחר יותר."
+    """Calculate a route using Transitous/MOTIS and OpenStreetMap, never Google billing."""
+    return compute_transitous_route(map_request)
 
 
 def podcast_tts_wav(dialogue):
