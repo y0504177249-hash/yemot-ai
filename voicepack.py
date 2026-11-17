@@ -152,7 +152,13 @@ def _worker(tts, voice, only, on_complete=None):
             if fatal_error:
                 # A quota or model-availability failure affects the remaining
                 # messages too; stop instead of retrying the same unavailable model 40 times.
-                remaining = [item[0] for item in MESSAGES[i + 1:] if not only or item[0] in only]
+                remaining = []
+                for j, item in enumerate(MESSAGES[i + 1:], start=i + 1):
+                    if only and item[0] not in only:
+                        continue
+                    remaining_path = os.path.join(outdir, file_name(j, item[0]) + ".wav")
+                    if not os.path.exists(remaining_path):
+                        remaining.append(item[0])
                 with _lock:
                     _state["failed"].extend(remaining)
                 break
