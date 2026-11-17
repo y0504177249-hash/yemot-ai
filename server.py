@@ -14,6 +14,9 @@ import threading
 import collections
 import requests
 import flask
+import html as html_module
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import voicepack
 from urllib.parse import urlencode
 try:
@@ -36,6 +39,9 @@ except ImportError:
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+# Maps routing is billable; require an explicit opt-in in addition to the API key.
+GOOGLE_MAPS_ROUTES_ENABLED = os.environ.get("GOOGLE_MAPS_ROUTES_ENABLED", "0") == "1"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 AUDIO_PROJECT = os.environ.get("AUDIO_PROJECT", "yemot-ai-1").strip() or "yemot-ai-1"
 # מפתח Gemini נפרד לכל מתקשר (לפי מספר טלפון), כדי שלכל אדם תהיה מכסה משלו. למשל {"0501234567": "AIza..."}
@@ -194,6 +200,7 @@ _store = {"settings": {}, "callers": {}, "loaded": 0.0, "source": "env", "error"
 _store_lock = threading.Lock()
 events = collections.deque(maxlen=100)
 _forum_memory = collections.deque(maxlen=50)
+_forum_content_memory = collections.deque(maxlen=100)
 
 
 def settings_defaults():
@@ -260,6 +267,7 @@ def redact(text):
         ADMIN_PASSWORD if "ADMIN_PASSWORD" in globals() else "",
         GEMINI_KEY_ENCRYPTION_KEY if "GEMINI_KEY_ENCRYPTION_KEY" in globals() else "",
         GEMINI_API_KEY,
+        GOOGLE_MAPS_API_KEY if "GOOGLE_MAPS_API_KEY" in globals() else "",
     ]
     try:
         secrets.extend(all_keys().values())
@@ -285,7 +293,8 @@ def system_prompt():
     tool_action = getattr(_tls, "tool_action", "") or ""
     tools_allowed = profile.get("tools_enabled", True) is not False
     mail_ok = selected_mode in ("smart", "tools", "central") and tools_allowed and mail_enabled_for(getattr(_tls, "phone", ""))
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed, tool_action)
+    clarification_done = bool(getattr(_tls, "tool_clarifications_done", False))
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed, tool_action, clarification_done)
     if key not in _prompt_cache:
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
         if tools_allowed:
@@ -299,7 +308,7 @@ def system_prompt():
             action_prompts = {
                 "mail": "המשתמש נמצא בתפריט המיילים. בצע רק פעולות מייל שהתבקשו במפורש. לשליחה השתמש ב-send_email, והשרת יבקש אישור לפני שליחה.",
                 "podcast": "המשתמש בחר יצירת הסכת. צור הסכת עברי קצר באורך כשתי דקות, בשיחה טבעית בין שני מגישים. החזר create_podcast={\"title\":\"כותרת\",\"dialogue\":[{\"speaker\":\"Host1\",\"text\":\"...\"},{\"speaker\":\"Host2\",\"text\":\"...\"}]}. צור 8 עד 12 חילופי דברים, עם מידע מדויק וללא המצאת עובדות.",
-                "image": "המשתמש בחר יצירת תמונה ושליחתה למייל. לפני יצירה ודא שיש כתובת יעד מפורשת או כתובת שמורה בפרופיל. החזר create_image={\"prompt\":\"תיאור מדויק של התמונה\",\"to\":\"כתובת או שם איש קשר\",\"subject\":\"נושא המייל\",\"body\":\"טקסט קצר למייל\"}. אל תטען שהתמונה נשלחה; השרת יפיק אותה ויבקש אישור שליחה.",
+                "image": "המשתמש בחר יצירת תמונה ושליחתה למייל. לאחר שאלת המיקוד, החזר create_image={\"prompt\":\"תיאור מדויק של התמונה\",\"to\":\"כתובת או שם איש קשר\",\"subject\":\"נושא המייל\",\"body\":\"טקסט קצר למייל\",\"publish_to_forum\":true,\"public_title\":\"כותרת ציבורית ללא פרטים אישיים\",\"public_description\":\"תיאור ציבורי קצר ללא פרטים אישיים\"}. פרסם בפורום כברירת מחדל, אך אל תפרסם פרטים אישיים, תוכן פרטי או מזהים. אל תטען שהתמונה נשלחה; השרת יפיק אותה ויבקש אישור שליחה.",
                 "file": "המשתמש בחר קריאת קבצים באמצעות AI. חפש תחילה מיילים עם קובץ מצורף באמצעות mail={\"action\":\"search\",\"query\":\"has:attachment\"}. לאחר בחירת מייל, השתמש ב-mail={\"action\":\"read_attachment\",\"index\":1,\"attachment_index\":1}. סכם בעברית את הקובץ לפי בקשת המשתמש. אם אין גישה למייל או לקובץ, אמור זאת במפורש.",
                 "writing": "המשתמש בחר כתיבה וניסוח. עזור בכתיבת טקסטים, עריכה וניסוח לפי המטרה והטון שביקש.",
                 "research": "המשתמש בחר חיפוש ומחקר. השתמש בכלי lookup הקיים כשנדרש מידע עובדתי או עדכני.",
@@ -308,9 +317,22 @@ def system_prompt():
                 "utility_calculator": "המשתמש בחר מחשבון. חשב בזהירות, בדוק את התוצאה פעם נוספת והקרא אותה בקצרה.",
                 "utility_conversion": "המשתמש בחר המרת יחידות או מטבע. הבהר יחידות ומטבעות, ובשערי מטבע השתמש במידע עדכני.",
                 "utility_translation": "המשתמש בחר תרגום. תרגם נאמנה לשפה שהתבקשה ושמור על המשמעות והטון.",
-                "utility_research": "המשתמש בחר חיפוש מהיר. השתמש בחיפוש כאשר נדרש מידע עובדתי או עדכני, וענה בתמצית."
+                "utility_research": "המשתמש בחר חיפוש מהיר. השתמש בחיפוש כאשר נדרש מידע עובדתי או עדכני, וענה בתמצית.",
+                "utility_map": "המשתמש בחר כלי מפות חד-פעמי, לא צ'אט. לאחר בקשה במשפט אחד, חלץ origin, destination, travel_mode (TRANSIT או WALK), time_kind (departure או arrival) ו-time_value בפורמט ISO 8601 עם אזור הזמן Asia/Jerusalem. אם פרט כלשהו חסר או לא ברור, החזר clarification_question במשפט אחד שמבקש את כל הפרטים החסרים יחד. כשכל הפרטים ברורים, החזר map_request עם השדות האלו והשאר answer ריק. לעולם אל תמציא מסלול, תחנה, קו או הוראה; השרת יחזיר הוראות רק משירות המפות."
             }
             text += " " + action_prompts.get(tool_action, "")
+        if selected_mode == "tools" and tool_action in CREATION_ACTIONS:
+            if clarification_done:
+                text += " המשתמש כבר ענה על שאלת המיקוד. השתמש בכל התשובות שכבר ניתנו והתחל ליצור; אל תשאל שוב על פרטים שכבר נענו. שאל רק אם פרט חיוני לביצוע חסר באמת."
+            else:
+                text += " לפני יצירת התוצר, אחרי שהמשתמש תיאר מה הוא רוצה, שאל שאלה אחת בלבד במשפט אחד שמרכז כמה שאלות מיקוד רלוונטיות: קהל יעד, מטרה, אורך, סגנון, פרטים שחובה לכלול ומגבלות. החזר את השאלה בשדה clarification_question והשאר שדות יצירה ריקים."
+            text += " אם התוצר מתאים לפרסום כללי ואינו אישי או פרטי, החזר גם forum_content עם title, content ותוכן מסוג אחד מתוך text, guide, plan או research. אל תכלול בפורום כתובות מייל, מספרי טלפון, פרטים אישיים, תוכן הודעות דואר או סיכומי קבצים פרטיים; אם התוצר פרטי או רגיש, השאר forum_content ריק."
+        if selected_mode == "tools" and tool_action == "image":
+            text += " השתמש בתשובות המיקוד כדי להכין create_image והוסף public_title ו-public_description שאינם חושפים פרטים אישיים. אם כתובת המייל עדיין חסרה, שאל רק מהי כתובת הנמען."
+        if selected_mode == "tools" and tool_action == "writing":
+            text += " התוצר הכתוב שביקש המשתמש הוא התוכן לפרסום בפורום, בתנאי שאינו אישי או פרטי. החזר forum_content מלא עם כותרת ותוכן."
+        if selected_mode == "tools" and tool_action == "utility_map":
+            text += " החזר map_request={\"origin\":\"כתובת מוצא\",\"destination\":\"כתובת יעד\",\"travel_mode\":\"TRANSIT או WALK\",\"time_kind\":\"departure או arrival\",\"time_value\":\"YYYY-MM-DDTHH:MM:SS+02:00 או היסט ישראל מתאים\"}. חייבים את כל חמשת הפרטים; אין להשלים מקום, שעה או אמצעי נסיעה בניחוש. שאל במשפט אחד על כל הפרטים החסרים. זהו כלי מפות ולא שיחה חופשית."
         text += ' אם המשתמש אומר במפורש "חזרה לתפריט" או "תפריט ראשי", הוסף ל-JSON את השדה return_to_menu=true וענה בקצרה שחוזרים לתפריט.'
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
@@ -548,6 +570,19 @@ def db_init(conn):
                 audio_path TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
             cur.execute("CREATE INDEX IF NOT EXISTS voice_forum_posts_created_idx ON voice_forum_posts(created_at DESC)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS forum_content_posts (
+                id BIGSERIAL PRIMARY KEY,
+                source_call_id TEXT NOT NULL DEFAULT '',
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT 'משתמש',
+                title TEXT NOT NULL DEFAULT 'תוכן חדש',
+                content_type TEXT NOT NULL DEFAULT 'text',
+                content_text TEXT NOT NULL DEFAULT '',
+                audio_path TEXT NOT NULL DEFAULT '',
+                image_data BYTEA,
+                image_mime TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            cur.execute("CREATE INDEX IF NOT EXISTS forum_content_posts_created_idx ON forum_content_posts(created_at DESC)")
             cur.execute("""CREATE TABLE IF NOT EXISTS admin_audio_files (
                 project_key TEXT NOT NULL,
                 filename TEXT NOT NULL,
@@ -1652,6 +1687,144 @@ def do_lookup(lookup, heard):
         return ""
 
 
+def _map_local_datetime(value):
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("missing map time")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Jerusalem"))
+    return parsed.astimezone(ZoneInfo("Asia/Jerusalem"))
+
+
+def compute_map_route(map_request):
+    """Return verified, provider-calculated route steps; never improvise directions."""
+    if not GOOGLE_MAPS_ROUTES_ENABLED or not GOOGLE_MAPS_API_KEY:
+        return (
+            "כלי המפות עדיין לא הופעל. חישוב מסלולים משתמש ב-Google Maps Routes API ועלול להיות כרוך בתשלום. "
+            "כדי להפעיל אותו, מנהל המערכת צריך להגדיר GOOGLE_MAPS_API_KEY ולהפעיל במפורש "
+            "את GOOGLE_MAPS_ROUTES_ENABLED."
+        )
+    origin = str(map_request.get("origin") or "").strip()[:300]
+    destination = str(map_request.get("destination") or "").strip()[:300]
+    mode = str(map_request.get("travel_mode") or "").strip().upper()
+    time_kind = str(map_request.get("time_kind") or "").strip().lower()
+    if not origin or not destination or mode not in ("TRANSIT", "WALK") or time_kind not in ("departure", "arrival"):
+        return "חסרים פרטי מסלול. אמור במשפט אחד מוצא, יעד, שעת יציאה או הגעה, והאם לנסוע בתחבורה ציבורית או ללכת ברגל."
+    try:
+        requested_time = _map_local_datetime(map_request.get("time_value"))
+    except Exception:
+        return "לא הצלחתי להבין את מועד הנסיעה. אמור תאריך ושעה ברורים ליציאה או להגעה."
+    body = {
+        "origin": {"address": origin},
+        "destination": {"address": destination},
+        "travelMode": mode,
+        "languageCode": "he-IL",
+        "regionCode": "IL",
+        "units": "METRIC",
+        "computeAlternativeRoutes": False,
+    }
+    # Google transit routing supports either arrivalTime or departureTime.
+    # Walking duration is returned as a route estimate; arrival-time requests are
+    # converted to an estimated departure after the route duration is known.
+    if mode == "TRANSIT":
+        body["arrivalTime" if time_kind == "arrival" else "departureTime"] = requested_time.isoformat(timespec="seconds")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": (
+            "routes.duration,routes.distanceMeters,routes.localizedValues,"
+            "routes.legs.steps.navigationInstruction.instructions,"
+            "routes.legs.steps.travelMode,routes.legs.steps.localizedValues,"
+            "routes.legs.steps.transitDetails"
+        ),
+    }
+    try:
+        response = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            json=body,
+            headers=headers,
+            timeout=25,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        routes = payload.get("routes") or []
+        if not routes:
+            return "לא נמצא מסלול מתאים בין המוצא ליעד בזמן שביקשת. בדוק את הכתובות או נסה שעה אחרת."
+        route = routes[0]
+        duration_raw = str(route.get("duration") or "")
+        duration_match = re.match(r"^(\d+(?:\.\d+)?)s$", duration_raw)
+        duration_seconds = int(float(duration_match.group(1))) if duration_match else 0
+        minutes = max(1, round(duration_seconds / 60)) if duration_seconds else 0
+        distance_m = int(route.get("distanceMeters") or 0)
+        distance_label = (f"{distance_m / 1000:.1f} קילומטרים" if distance_m >= 1000
+                          else (f"{distance_m} מטרים" if distance_m else "מרחק לא זמין"))
+        localized = route.get("localizedValues") or {}
+        duration_label = ((localized.get("duration") or {}).get("text") or
+                          (f"כ-{minutes} דקות" if minutes else "משך זמן לא זמין"))
+        steps = (route.get("legs") or [{}])[0].get("steps") or []
+        instructions = []
+        for step in steps:
+            transit = step.get("transitDetails") or {}
+            if transit:
+                line = transit.get("transitLine") or {}
+                stops = transit.get("stopDetails") or {}
+                departure_stop = (stops.get("departureStop") or {}).get("name") or "התחנה הקרובה"
+                arrival_stop = (stops.get("arrivalStop") or {}).get("name") or "תחנת היעד"
+                line_name = line.get("nameShort") or line.get("shortName") or line.get("name") or "תחבורה ציבורית"
+                vehicle = (line.get("vehicle") or {}).get("name") or ""
+                headsign = transit.get("headsign") or ""
+                detail = f"עלה על {vehicle + ' ' if vehicle else ''}{line_name} בתחנת {departure_stop}"
+                if headsign:
+                    detail += f", בכיוון {headsign}"
+                detail += f", ורד בתחנת {arrival_stop}"
+                instructions.append(detail)
+                continue
+            instruction = ((step.get("navigationInstruction") or {}).get("instructions") or "").strip()
+            if instruction:
+                instruction = re.sub(r"<[^>]*>", " ", instruction)
+                instruction = html_module.unescape(" ".join(instruction.split()))
+                localized_step = step.get("localizedValues") or {}
+                step_distance = (localized_step.get("distance") or {}).get("text")
+                if step_distance:
+                    instruction += f" ({step_distance})"
+                instructions.append(instruction)
+        if not instructions:
+            return "שירות המפות מצא מסלול אך לא החזיר הוראות מפורטות. נסה שוב מאוחר יותר."
+        if mode == "WALK" and duration_seconds:
+            if time_kind == "arrival":
+                departure = requested_time - timedelta(seconds=duration_seconds)
+                time_line = f"כדי להגיע בסביבות {requested_time.strftime('%H:%M')}, צא להליכה בסביבות {departure.strftime('%H:%M')}."
+            else:
+                arrival = requested_time + timedelta(seconds=duration_seconds)
+                time_line = f"צא להליכה בשעה {requested_time.strftime('%H:%M')}; ההגעה המשוערת היא בסביבות {arrival.strftime('%H:%M')}."
+        elif time_kind == "departure":
+            time_line = f"שעת היציאה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
+        else:
+            time_line = f"שעת ההגעה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
+        mode_label = "תחבורה ציבורית" if mode == "TRANSIT" else "הליכה ברגל"
+        steps = instructions[:14]
+        numbered = " ".join(f"שלב {i + 1}: {item}." for i, item in enumerate(steps))
+        return (
+            f"מצאתי מסלול מ{origin} אל {destination}, באמצעות {mode_label}. "
+            f"{time_line} משך משוער {duration_label}, מרחק {distance_label}. "
+            f"ההדרכה לפי הסדר: {numbered}"
+        )
+    except requests.HTTPError as e:
+        status = getattr(getattr(e, "response", None), "status_code", 0)
+        print("Google Maps route request failed:", status, flush=True)
+        if status in (400, 404):
+            return "לא הצלחתי לחשב את המסלול. בדוק את שמות המקומות, התאריך והשעה."
+        if status in (401, 403):
+            return "שירות המפות אינו מאושר לשימוש במפתח שהוגדר. מנהל המערכת צריך לבדוק את הרשאת Routes API."
+        return "שירות המפות אינו זמין כרגע. נסה שוב מאוחר יותר."
+    except Exception as e:
+        print("map route calculation failed:", redact(e)[:180], flush=True)
+        return "לא הצלחתי לחשב את המסלול כרגע. נסה שוב מאוחר יותר."
+
+
 def podcast_tts_wav(dialogue):
     last_err = None
     contents = []
@@ -1712,14 +1885,29 @@ def create_podcast_audio(call_id, payload):
     if full_chars > 9000:
         return "ההסכת ארוך מדי ליצירה אחת. בקש פרק קצר יותר."
     wav = podcast_tts_wav(clean)
-    name = "pod" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
-    path = upload_to_yemot(wav, name)
+    title = str(payload.get("title") or "הסכת חדש")[:100]
+    dialogue_text = "\n".join(
+        ("מגיש ראשון: " if item["speaker"] == "Host1" else "מגיש שני: ") + item["text"]
+        for item in clean
+    )
+    public_safe = forum_public_content_safe(title, dialogue_text)
+    path = forum_upload_audio(wav, call_id) if public_safe else upload_to_yemot(
+        wav, "pod" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
+    )
+    published = None
+    if public_safe:
+        published = save_generated_forum_post(
+            call_id, getattr(_tls, "phone", ""), title, dialogue_text,
+            content_type="podcast", audio_path=path,
+        )
     with lock:
         st = calls.get(call_id)
         if st is not None:
             st["generated_audio"] = path
-            st["podcast_title"] = str(payload.get("title") or "הסכת")[:100]
-    return "ההסכת נוצר. הקובץ מוכן להאזנה."
+            st["podcast_title"] = title
+    if published:
+        return "ההסכת נוצר ופורסם בפורום שבאתר ובקו. הקובץ מוכן להאזנה."
+    return "ההסכת נוצר. בגלל פרטי קשר או מידע פרטי בתוכן, הוא לא פורסם בפורום, אך הקובץ מוכן להאזנה."
 
 
 def generate_image_bytes(prompt):
@@ -1743,23 +1931,37 @@ def generate_image_bytes(prompt):
 
 
 def prepare_image_email(call_id, phone, action):
-    to = (action.get("to") or caller(phone).get("email_address") or "").strip()
-    if not to:
-        return "כדי לשלוח את התמונה, אמור תחילה את כתובת המייל של הנמען."
-    if not mail_enabled_for(phone) or not EMAIL_ENABLED:
-        return "אין כרגע חיבור מייל פעיל בחשבון הזה. התמונה לא נשלחה."
-    candidates = resolve_recipient(to)
-    if not candidates:
-        return "לא מצאתי כתובת מייל מתאימה. אמור את כתובת המייל המלאה."
-    if len(candidates) > 1:
-        options = ", ".join((c.get("name") or "") + " " + speak_email(c["email"]) for c in candidates[:3])
-        return "מצאתי כמה כתובות אפשריות: " + options + ". אמור כתובת מלאה."
     prompt = (action.get("prompt") or "").strip()
     if not prompt:
         return "תאר איזו תמונה ליצור."
-    raw, mime_type = generate_image_bytes(prompt)
+    try:
+        raw, mime_type = generate_image_bytes(prompt)
+    except Exception as e:
+        print("image generation failed:", redact(e)[:180], flush=True)
+        return "לא הצלחתי ליצור את התמונה כרגע. נסה שוב עם תיאור מעט קצר יותר."
     if len(raw) > 8 * 1024 * 1024:
-        return "התמונה שנוצרה גדולה מדי לשליחה במייל."
+        return "התמונה שנוצרה גדולה מדי לשמירה ולפרסום."
+    published = None
+    if action.get("publish_to_forum", True) is not False:
+        public_title = str(action.get("public_title") or "תמונה חדשה")[:120]
+        public_description = str(
+            action.get("public_description") or "תמונה שנוצרה באמצעות בינה מלאכותית."
+        )[:3000]
+        published = save_generated_forum_post(
+            call_id, phone, public_title, public_description,
+            content_type="image", image_data=raw, image_mime=mime_type,
+        )
+    to = (action.get("to") or caller(phone).get("email_address") or "").strip()
+    if not to:
+        return "התמונה נוצרה" + (" ופורסמה בפורום באתר ובקו." if published else ".") + " כדי לשלוח אותה למייל, אמור את כתובת הנמען."
+    if not mail_enabled_for(phone) or not EMAIL_ENABLED:
+        return "התמונה נוצרה" + (" ופורסמה בפורום באתר ובקו." if published else ".") + " אבל חיבור המייל אינו פעיל כרגע, ולכן לא נשלחה."
+    candidates = resolve_recipient(to)
+    if not candidates:
+        return "התמונה נוצרה" + (" ופורסמה בפורום." if published else ".") + " לא מצאתי כתובת מייל מתאימה. אמור את כתובת המייל המלאה."
+    if len(candidates) > 1:
+        options = ", ".join((c.get("name") or "") + " " + speak_email(c["email"]) for c in candidates[:3])
+        return "מצאתי כמה כתובות אפשריות: " + options + ". אמור כתובת מלאה."
     filename = "ai-image-" + re.sub(r"[^0-9A-Za-z]", "", str(call_id))[:10] + ".png"
     attachment = {
         "filename": filename,
@@ -1777,7 +1979,7 @@ def prepare_image_email(call_id, phone, action):
                 "attachment": attachment,
             }
     target = (c.get("name") + " בכתובת ") if c.get("name") else "לכתובת "
-    return "יצרתי את התמונה. אני עומד לשלוח אותה " + target + speak_email(c["email"]) + ". האם לשלוח? אמור כן או לא."
+    return "יצרתי את התמונה" + (" ופרסמתי אותה בפורום." if published else ".") + " אני עומד לשלוח אותה " + target + speak_email(c["email"]) + ". האם לשלוח? אמור כן או לא."
 
 
 def ask_gemini(call_id, audio_bytes, phone=""):
@@ -1814,10 +2016,36 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     confirm = data.get("confirm_pending")
     create_podcast = data.get("create_podcast")
     create_image = data.get("create_image")
+    map_request = data.get("map_request")
+    clarification_question = (data.get("clarification_question") or "").strip()
+    forum_content = data.get("forum_content")
     return_to_menu = bool(data.get("return_to_menu"))
+    tool_action = getattr(_tls, "tool_action", "") or ""
+    suppress_actions = False
+    with lock:
+        tool_state = calls.get(call_id)
+        clarification_already_asked = bool(tool_state and tool_state.get("tool_clarifications_done"))
+    if assistant_mode == "tools" and tool_action in CREATION_ACTIONS and not clarification_already_asked:
+        # Always collect focused details once before making a creative artifact.
+        answer = clarification_question or default_tool_clarification(tool_action)
+        suppress_actions = True
+        with lock:
+            tool_state = calls.get(call_id)
+            if tool_state is not None:
+                tool_state["tool_clarifications_done"] = True
+                tool_state["tool_clarification_waiting"] = True
+    elif clarification_question and assistant_mode == "tools" and tool_action:
+        answer = clarification_question
+        suppress_actions = True
+        with lock:
+            tool_state = calls.get(call_id)
+            if tool_state is not None:
+                tool_state["tool_clarification_waiting"] = True
 
     try:
-        if mail_ok and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
+        if suppress_actions:
+            pass
+        elif mail_ok and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
             print(f"mail request from {phone or 'unknown'}", flush=True)
             _tls.kind = "mail"
             if not mail_enabled_for(phone):
@@ -1843,6 +2071,43 @@ def ask_gemini(call_id, audio_bytes, phone=""):
             else:
                 _tls.kind = "image"
                 answer = prepare_image_email(call_id, phone, create_image)
+        elif tool_action == "utility_map":
+            if not tools_allowed:
+                answer = "אין לך הרשאה להשתמש בכלי מפות"
+            elif not isinstance(map_request, dict):
+                answer = clarification_question or "כדי לחשב מסלול, אמור במשפט אחד מוצא, יעד, מועד יציאה או הגעה, והאם מדובר בתחבורה ציבורית או הליכה."
+                with lock:
+                    tool_state = calls.get(call_id)
+                    if tool_state is not None:
+                        tool_state["tool_clarification_waiting"] = True
+            else:
+                _tls.kind = "map"
+                answer = compute_map_route(map_request)
+                if answer.startswith("חסרים פרטי מסלול") or answer.startswith("לא הצלחתי להבין את מועד"):
+                    with lock:
+                        tool_state = calls.get(call_id)
+                        if tool_state is not None:
+                            tool_state["tool_clarification_waiting"] = True
+        elif isinstance(forum_content, dict) and tool_action in CREATION_ACTIONS:
+            if not tools_allowed:
+                answer = "אין לך הרשאה להשתמש בכלי יצירת תוכן"
+            else:
+                title = str(forum_content.get("title") or "תוכן חדש")[:120]
+                content_text = str(forum_content.get("content") or "").strip()[:20000]
+                content_type = str(forum_content.get("content_type") or "text")[:30]
+                if content_text:
+                    published = save_generated_forum_post(
+                        call_id, phone, title, content_text, content_type=content_type
+                    )
+                    answer = (str(data.get("answer") or "").strip() or
+                              ("התוכן נוצר ופורסם בפורום." if published else "התוכן נוצר, אך לא הצלחתי לפרסם אותו בפורום."))
+        elif tool_action == "writing" and assistant_mode == "tools" and answer and not forum_content:
+            # The writing tool creates a public-ready draft unless the model marked it private.
+            published = save_generated_forum_post(
+                call_id, phone, "טקסט חדש", answer, content_type="text"
+            )
+            if published:
+                answer = "הטקסט נוצר ונוסף לפורום באתר ובקו."
         elif isinstance(lookup, dict) and (lookup.get("query") or heard):
             if not tools_allowed:
                 answer = "אין לך הרשאה להשתמש בכלי AI"
@@ -1918,7 +2183,10 @@ def transcribe_caller_name(recorded, phone, use_yiddish):
 
 
 def worker_name(call_id, recorded, phone, use_yiddish):
-    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if use_yiddish else "/8")
+    state = calls.get(call_id) or {}
+    fallback = "/1/1" if use_yiddish else "/8"
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or fallback
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in all_keys() else "default"
     name = transcribe_caller_name(recorded, phone, use_yiddish)
@@ -1941,7 +2209,11 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None, t
     _tls.assistant_mode = assistant_mode or ("yiddish" if _tls.yiddish else "smart")
     _tls.tool_action = tool_action or ""
     _tls.phone = phone
-    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if _tls.yiddish else "/8")
+    state = calls.get(call_id) or {}
+    _tls.tool_clarifications_done = bool(state.get("tool_clarifications_done"))
+    fallback = "/1/1" if _tls.yiddish else "/8"
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or fallback
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     t0 = time.time()
     failed = False
     err = ""
@@ -2089,6 +2361,8 @@ def return_to_main_menu(st):
     st.pop("tools_action", None)
     st.pop("tools_prompt", None)
     st.pop("utility_action", None)
+    st.pop("tool_clarifications_done", None)
+    st.pop("tool_clarification_waiting", None)
     st["turn"] += 1
     return _digits(st, main_menu_text())
 
@@ -2121,9 +2395,32 @@ def tools_area(st, p, call_id, phone, recorded, use_yiddish):
         if st.get("status") == "done":
             audio = st.get("audio")
             st["status"] = "idle"
+            if st.get("tool_clarification_waiting"):
+                st["tool_clarification_waiting"] = False
+                st["tools_recording"] = True
+                st["last"] = None
+                st["turn"] += 1
+                return Response(
+                    read_command(st.get("answer") or "ענה בבקשה על שאלת המיקוד.", call_id, st["turn"]),
+                    mimetype="text/plain",
+                )
+            if st.get("tools_action") == "utility_map":
+                st["menu_stage"] = "utilities"
+                st["tools_busy"] = False
+                st["tools_recording"] = False
+                st.pop("tools_action", None)
+                st.pop("tools_prompt", None)
+                st.pop("tool_clarifications_done", None)
+                if audio:
+                    return Response(
+                        f"id_list_message=f-{audio}&go_to_folder={active_extension_path()}",
+                        mimetype="text/plain",
+                    )
+                return _digits(st, utilities_menu_text())
             st["tools_busy"] = False
             st.pop("tools_action", None)
             st.pop("tools_prompt", None)
+            st.pop("tool_clarifications_done", None)
             if audio:
                 return Response(
                     f"id_list_message=f-{audio}&go_to_folder={active_extension_path()}",
@@ -2156,6 +2453,8 @@ def tools_area(st, p, call_id, phone, recorded, use_yiddish):
         st["tools_prompt"] = prompt
         st["tools_busy"] = True
         st["tools_recording"] = True
+        st["tool_clarifications_done"] = False
+        st["tool_clarification_waiting"] = False
         st["turn"] += 1
         return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
 
@@ -2348,7 +2647,8 @@ def utilities_menu_text(message=""):
         prefix + "תפריט כלים שימושיים. "
         "לבדיקת מזג אוויר הקש אחת. לחישוב הקש שתיים. "
         "להמרת יחידות ומטבעות הקש שלוש. לתרגום הקש ארבע. "
-        "לחיפוש מהיר הקש חמש. לחזרה לתפריט הראשי הקש אפס. "
+        "לחיפוש מהיר הקש חמש. למפות ולתכנון מסלול הקש שש. "
+        "לחזרה לתפריט הראשי הקש אפס. "
         "לחזרה לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית."
     )
 
@@ -2359,6 +2659,7 @@ UTILITY_ACTIONS = {
     "3": ("utility_conversion", "המרת יחידות ומטבעות", "אמור מה להמיר, מאיזו יחידה או מטבע ולאיזו יחידה או מטבע."),
     "4": ("utility_translation", "תרגום", "אמור את הטקסט ואת שפת היעד לתרגום."),
     "5": ("utility_research", "חיפוש מהיר", "אמור מה תרצה לחפש ולבדוק."),
+    "6": ("utility_map", "מפות", "במשפט אחד אמור את המוצא, היעד, תאריך ושעת היציאה או ההגעה, והאם אתה מעדיף תחבורה ציבורית או הליכה ברגל."),
 }
 
 
@@ -2375,9 +2676,22 @@ def utilities_area(st, p, call_id):
         if not selected:
             return _digits(st, utilities_menu_text("לא זיהיתי את הבחירה"))
         action, label, prompt = selected
-        st["menu_stage"] = "utility_chat"
-        st["tools_chat"] = True
-        st["tools_action"] = action
+        if action == "utility_map":
+            # A one-shot route request, not a free-form tools chat.
+            st["menu_stage"] = "utility_map"
+            st["tools_chat"] = False
+            st["tools_busy"] = True
+            st["tools_recording"] = True
+            st["tools_action"] = action
+            st["tools_prompt"] = prompt
+            st["tool_clarifications_done"] = True
+            st["tool_clarification_waiting"] = False
+        else:
+            st["menu_stage"] = "utility_chat"
+            st["tools_chat"] = True
+            st["tools_action"] = action
+            st["tool_clarifications_done"] = False
+            st["tool_clarification_waiting"] = False
         st["last"] = None
         st["status"] = "idle"
         st["turn"] += 1
@@ -2388,8 +2702,9 @@ def utilities_area(st, p, call_id):
 def forum_menu_text(message=""):
     prefix = (message + ". ") if message else ""
     return (
-        prefix + "הפורום הקולי בעיוות קול. "
-        "להאזנה להודעות האחרונות הקש אחת. לפרסום הודעה קולית חדשה הקש שתיים. "
+        prefix + "הפורום הקולי והתכנים שנוצרו במערכת. "
+        "להאזנה להודעות ולתכנים של משתמשים אחרים, כולל הסכתים, הקש אחת. "
+        "לפרסום הודעה קולית חדשה בעיוות קול הקש שתיים. "
         "לחזרה לתפריט הראשי הקש אפס. לחזרה לתפריט הקודם הקש כוכבית. לסולמית לחזרה לתפריט הראשי."
     )
 
@@ -2441,6 +2756,77 @@ def forum_upload_audio(raw_audio, call_id):
     return folder + "/" + filename
 
 
+def forum_public_content_safe(title, content_text):
+    combined = str(title or "") + "\n" + str(content_text or "")
+    if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", combined):
+        return False
+    # Avoid auto-publishing obvious Israeli mobile/landline phone numbers.
+    if re.search(r"(?<!\d)(?:\+972[- .]?|0)(?:5\d|[2-9])[- .]?\d{3}[- .]?\d{4}(?!\d)", combined):
+        return False
+    return True
+
+
+def save_generated_forum_post(call_id, phone, title, content_text, content_type="text",
+                                audio_path="", image_data=None, image_mime=""):
+    """Publish a non-private generated artifact to the shared website and phone forum."""
+    title = " ".join(str(title or "תוכן חדש").split())[:120] or "תוכן חדש"
+    content_text = str(content_text or "").strip()[:20000]
+    content_type = str(content_type or "text")[:30]
+    if not content_text and not image_data:
+        return None
+    if not forum_public_content_safe(title, content_text):
+        print("generated forum post skipped: contact details detected", flush=True)
+        return None
+    if not audio_path:
+        speech_text = (title + ". " + content_text)[:1800]
+        try:
+            wav = tts_wav(speech_text, cfg("default_voice"))
+            audio_path = forum_upload_audio(wav, call_id)
+        except Exception as e:
+            print("generated forum audio failed:", redact(e)[:180], flush=True)
+            audio_path = ""
+    display_name = (caller(phone).get("name") or "משתמש")[:50]
+    record = {
+        "id": int(time.time() * 1000),
+        "source_call_id": str(call_id or "")[:200],
+        "phone": str(phone or "")[:30],
+        "name": display_name,
+        "title": title,
+        "content_type": content_type,
+        "content_text": content_text,
+        "audio_path": audio_path,
+        "image_data": image_data,
+        "image_mime": image_mime or "",
+        "created_at": time.strftime("%d/%m %H:%M"),
+    }
+    conn = db_connect()
+    if conn is None:
+        _forum_content_memory.appendleft(record)
+        return record
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO forum_content_posts
+                       (source_call_id, phone, display_name, title, content_type,
+                        content_text, audio_path, image_data, image_mime)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       RETURNING id, created_at""",
+                    (record["source_call_id"], record["phone"], display_name, title,
+                     content_type, content_text, audio_path, image_data, record["image_mime"]),
+                )
+                row = cur.fetchone()
+        record["id"] = row[0]
+        record["created_at"] = row[1].strftime("%d/%m %H:%M")
+        return record
+    except Exception as e:
+        print("generated forum post save failed:", redact(e)[:180], flush=True)
+        _forum_content_memory.appendleft(record)
+        return record
+    finally:
+        conn.close()
+
+
 def forum_save_post(phone, audio_path):
     display_name = (caller(phone).get("name") or "משתמש")[:50]
     record = {
@@ -2474,25 +2860,34 @@ def forum_save_post(phone, audio_path):
 
 
 def forum_recent_posts(limit=8):
+    limit = max(1, min(int(limit), 12))
     conn = db_connect()
     if conn is None:
-        return list(_forum_memory)[:limit]
+        combined = list(_forum_memory) + list(_forum_content_memory)
+        return sorted(combined, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, display_name, audio_path, created_at FROM voice_forum_posts ORDER BY created_at DESC, id DESC LIMIT %s",
-                (max(1, min(int(limit), 8)),),
+                """SELECT id, display_name, audio_path, created_at, 'voice' AS post_kind, '' AS title, '' AS content_text
+                   FROM voice_forum_posts
+                   UNION ALL
+                   SELECT id, display_name, audio_path, created_at, 'generated' AS post_kind, title, content_text
+                   FROM forum_content_posts
+                   ORDER BY created_at DESC, id DESC LIMIT %s""",
+                (limit,),
             )
             rows = cur.fetchall()
         conn.commit()
         return [
-            {"id": row[0], "name": row[1] or "משתמש", "audio_path": row[2],
-             "created_at": row[3].strftime("%d/%m %H:%M")}
+            {"id": row[0], "name": ((row[5] + " מאת ") if row[5] else "") + (row[1] or "משתמש"),
+             "audio_path": row[2], "created_at": row[3].strftime("%d/%m %H:%M"),
+             "kind": row[4], "title": row[5] or "", "content_text": row[6] or ""}
             for row in rows
         ]
     except Exception as e:
         print("forum list failed:", redact(e)[:160], flush=True)
-        return list(_forum_memory)[:limit]
+        combined = list(_forum_memory) + list(_forum_content_memory)
+        return sorted(combined, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
     finally:
         conn.close()
 
@@ -2500,7 +2895,9 @@ def forum_recent_posts(limit=8):
 def forum_worker(call_id, recorded, phone):
     state = calls.get(call_id)
     _tls.phone = phone
-    _tls.record_path = _tls.extension_path = (state or {}).get("ext_path") or "/8"
+    state = state or {}
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or "/8"
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     try:
         original = download_recording(recorded)
         altered = forum_distort_voice(original)
@@ -2584,10 +2981,14 @@ def forum_area(st, p, call_id, phone, recorded):
             if val.isdigit() and 1 <= int(val) <= len(posts):
                 post = posts[int(val) - 1]
                 st["forum_stage"] = "menu"
-                return Response(
-                    f"id_list_message=f-{post['audio_path']}&go_to_folder={active_extension_path()}",
-                    mimetype="text/plain",
-                )
+                if post.get("audio_path"):
+                    return Response(
+                        f"id_list_message=f-{post['audio_path']}&go_to_folder={active_extension_path()}",
+                        mimetype="text/plain",
+                    )
+                spoken = clean_for_tts((post.get("title") or "תוכן בפורום") + ". " + (post.get("content_text") or ""))
+                st["turn"] += 1
+                return Response(read_command(spoken or "התוכן הזה אינו כולל הקלטה.", call_id, st["turn"]), mimetype="text/plain")
             return _digits(st, "הבחירה אינה תקינה. " + forum_menu_text())
     return _digits(st, forum_menu_text())
 
@@ -2628,7 +3029,9 @@ def _save_profile(phone, **changes):
 
 def worker_rename(call_id, recorded, phone):
     _tls.phone = phone
-    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or "/7"
+    state = calls.get(call_id) or {}
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or "/7"
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in all_keys() else "default"
     name = transcribe_caller_name(recorded, phone, False)
@@ -2842,6 +3245,7 @@ def ivr():
         _tls.extension_path = ext_path
     else:
         # בכניסה הראשית מקליטים בתיקייה 8, אך חוזרים לשורש התפריט לאחר המתנה.
+        ext_path = EXTENSION_PATH
         _tls.record_path = "/1/1" if use_yiddish else RECORD_PATH
         _tls.extension_path = EXTENSION_PATH
     maybe_refresh()
@@ -2895,7 +3299,9 @@ def ivr():
         st = calls.setdefault(
             call_id,
             {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
-             "voice": voice_index_for(phone, assistant_mode), "audio": None, "ext_path": ext_path},
+             "voice": voice_index_for(phone, assistant_mode), "audio": None,
+             "ext_path": ext_path, "record_path": active_record_path(),
+             "extension_path": active_extension_path()},
         )
         # The greeting uses the latest saved turn; ask_gemini loads the full
         # assistant-specific context lazily after the caller chooses an assistant.
@@ -2962,6 +3368,9 @@ def ivr():
             elif menu_stage == "utility_chat":
                 assistant_mode = "tools"
                 st["tools_chat"] = True
+            elif menu_stage == "utility_map":
+                assistant_mode = "tools"
+                st["tools_chat"] = False
             elif menu_stage == "personal":
                 assistant_mode = "personal"
             elif menu_stage == "forum":
@@ -3367,6 +3776,148 @@ def admin_set_personal_pin(phone):
         return jsonify({"ok": True})
     finally:
         conn.close()
+
+
+FORUM_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forum.html")
+
+
+@app.route("/forum")
+@app.route("/forum/")
+def public_forum_page():
+    return send_file(FORUM_HTML, mimetype="text/html")
+
+
+@app.route("/forum/api/posts")
+def public_forum_posts():
+    conn = db_connect()
+    if conn is None:
+        voice = list(_forum_memory)
+        generated = list(_forum_content_memory)
+        combined = []
+        for post in voice:
+            combined.append({
+                "id": post.get("id"), "kind": "voice", "title": "הודעה קולית",
+                "content_type": "voice", "content": "", "name": post.get("name") or "משתמש",
+                "created_at": post.get("created_at") or "", "has_audio": bool(post.get("audio_path")),
+                "has_image": False,
+            })
+        for post in generated:
+            combined.append({
+                "id": post.get("id"), "kind": "generated", "title": post.get("title") or "תוכן חדש",
+                "content_type": post.get("content_type") or "text", "content": post.get("content_text") or "",
+                "name": post.get("name") or "משתמש", "created_at": post.get("created_at") or "",
+                "has_audio": bool(post.get("audio_path")), "has_image": bool(post.get("image_data")),
+            })
+        combined.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return jsonify({"items": combined[:50]})
+    try:
+        items = []
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, display_name, created_at
+                   FROM voice_forum_posts ORDER BY created_at DESC, id DESC LIMIT 50"""
+            )
+            for row in cur.fetchall():
+                items.append({
+                    "id": row[0], "kind": "voice", "title": "הודעה קולית",
+                    "content_type": "voice", "content": "", "name": row[1] or "משתמש",
+                    "created_at": row[2].isoformat(), "has_audio": True, "has_image": False,
+                })
+            cur.execute(
+                """SELECT id, display_name, title, content_type, content_text,
+                          (audio_path <> ''), (image_data IS NOT NULL), created_at
+                   FROM forum_content_posts ORDER BY created_at DESC, id DESC LIMIT 50"""
+            )
+            for row in cur.fetchall():
+                items.append({
+                    "id": row[0], "kind": "generated", "title": row[2] or "תוכן חדש",
+                    "content_type": row[3] or "text", "content": row[4] or "",
+                    "name": row[1] or "משתמש", "created_at": row[7].isoformat(),
+                    "has_audio": bool(row[5]), "has_image": bool(row[6]),
+                })
+        items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return jsonify({"items": items[:50]})
+    except Exception as e:
+        print("public forum listing failed:", redact(e)[:160], flush=True)
+        return jsonify({"error": "טעינת הפורום נכשלה"}), 500
+    finally:
+        conn.close()
+
+
+def download_forum_audio_path(audio_path):
+    path = str(audio_path or "").strip()
+    if not path:
+        raise ValueError("missing forum audio path")
+    if path.startswith("ivr2:"):
+        yemot_path = path
+    else:
+        yemot_path = "ivr2:" + (path if path.startswith("/") else "/" + path)
+    if not yemot_path.lower().endswith(".wav"):
+        yemot_path += ".wav"
+    response = requests.get(
+        "https://www.call2all.co.il/ym/api/DownloadFile",
+        params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": yemot_path},
+        timeout=25,
+    )
+    response.raise_for_status()
+    if not response.content:
+        raise RuntimeError("empty forum audio")
+    return response.content
+
+
+@app.route("/forum/api/posts/<kind>/<int:post_id>/audio")
+def public_forum_audio(kind, post_id):
+    conn = db_connect()
+    if conn is None:
+        memory = _forum_memory if kind == "voice" else _forum_content_memory
+        item = next((post for post in memory if int(post.get("id") or 0) == post_id), None)
+        if not item:
+            return jsonify({"error": "קובץ השמע לא נמצא"}), 404
+        audio_path = item.get("audio_path")
+    else:
+        try:
+            with conn.cursor() as cur:
+                if kind == "voice":
+                    cur.execute("SELECT audio_path FROM voice_forum_posts WHERE id=%s", (post_id,))
+                elif kind == "generated":
+                    cur.execute("SELECT audio_path FROM forum_content_posts WHERE id=%s", (post_id,))
+                else:
+                    return jsonify({"error": "סוג פרסום לא תקין"}), 400
+                row = cur.fetchone()
+            if not row or not row[0]:
+                return jsonify({"error": "קובץ השמע לא נמצא"}), 404
+            audio_path = row[0]
+        finally:
+            conn.close()
+    try:
+        raw = download_forum_audio_path(audio_path)
+        return send_file(io.BytesIO(raw), mimetype="audio/wav", as_attachment=False,
+                         download_name=f"forum-{kind}-{post_id}.wav", max_age=60)
+    except Exception as e:
+        print("public forum audio failed:", redact(e)[:160], flush=True)
+        return jsonify({"error": "השמעת קובץ השמע נכשלה"}), 502
+
+
+@app.route("/forum/api/posts/<int:post_id>/image")
+def public_forum_image(post_id):
+    conn = db_connect()
+    if conn is None:
+        item = next((post for post in _forum_content_memory if int(post.get("id") or 0) == post_id), None)
+        if not item or not item.get("image_data"):
+            return jsonify({"error": "התמונה לא נמצאה"}), 404
+        raw, mime_type = item["image_data"], item.get("image_mime") or "image/png"
+    else:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT image_data, image_mime FROM forum_content_posts WHERE id=%s", (post_id,))
+                row = cur.fetchone()
+            if not row or not row[0]:
+                return jsonify({"error": "התמונה לא נמצאה"}), 404
+            raw, mime_type = bytes(row[0]), row[1] or "image/png"
+        finally:
+            conn.close()
+    return send_file(io.BytesIO(raw), mimetype=mime_type, as_attachment=False,
+                     download_name=f"forum-image-{post_id}", max_age=300)
 
 
 @app.route("/admin")

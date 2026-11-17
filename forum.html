@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="index, follow">
+<title>פורום התכנים — העוזר הקולי</title>
+<style>
+:root{color-scheme:light dark;--ink:#16222e;--muted:#596a63;--paper:#edf0ec;--panel:#fff;--line:#cbd3cd;--accent:#1d4e89}
+@media(prefers-color-scheme:dark){:root{--ink:#e6ece8;--muted:#9daaa4;--paper:#0f171e;--panel:#16212a;--line:#2a3945;--accent:#7db0ea}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 system-ui,"Segoe UI",Arial,sans-serif}
+main{max-width:880px;margin:0 auto;padding:24px 16px 64px}
+header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:28px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0}
+a{color:var(--accent)}
+button{font:inherit;min-height:42px;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);cursor:pointer}
+#status{color:var(--muted);margin:14px 0}
+.feed{display:grid;gap:14px}
+article{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;overflow:hidden}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h2{font-size:19px;margin:0 0 4px}
+.meta{font-size:13px;color:var(--muted)}
+.kind{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:2px 8px;white-space:nowrap}
+.content{white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0}
+article img{display:block;max-width:100%;max-height:560px;object-fit:contain;border-radius:8px;margin:12px auto}
+audio{display:block;width:100%;margin-top:12px}
+.empty{background:var(--panel);border:1px dashed var(--line);border-radius:12px;padding:24px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <h1>פורום התכנים</h1>
+    <p class="sub">הודעות קוליות, הסכתים, תמונות ותוצרים שנוצרו בכלי הבינה.</p>
+  </div>
+  <div>
+    <button id="refresh" type="button">רענון תכנים</button>
+    <a href="/">לאתר הניהול</a>
+  </div>
+</header>
+<p id="status" role="status">טוען תכנים...</p>
+<section id="feed" class="feed" aria-live="polite"></section>
+</main>
+<script>
+(function(){
+  var feed=document.getElementById('feed');
+  var status=document.getElementById('status');
+  var labels={voice:'הודעה קולית',podcast:'הסכת',image:'תמונה',text:'טקסט',guide:'מדריך',plan:'תוכנית',research:'מחקר'};
+  function node(tag,cls,text){var el=document.createElement(tag);if(cls)el.className=cls;if(text!==undefined)el.textContent=text;return el;}
+  function card(item){
+    var box=node('article');
+    var top=node('div','top');
+    var left=document.createElement('div');
+    left.append(node('h2','',item.title||'תוכן בפורום'));
+    left.append(node('div','meta',(item.name||'משתמש')+' · '+(item.created_at||'')));
+    top.append(left);
+    top.append(node('span','kind',labels[item.content_type]||'תוכן'));
+    box.append(top);
+    if(item.content){box.append(node('p','content',item.content));}
+    if(item.has_image){
+      var img=document.createElement('img');
+      img.loading='lazy';img.alt=item.title||'תמונה שנוצרה במערכת';
+      img.src='/forum/api/posts/'+encodeURIComponent(item.id)+'/image';
+      box.append(img);
+    }
+    if(item.has_audio){
+      var audio=document.createElement('audio');
+      audio.controls=true;audio.preload='none';
+      audio.src='/forum/api/posts/'+encodeURIComponent(item.kind)+'/'+encodeURIComponent(item.id)+'/audio';
+      box.append(audio);
+    }
+    return box;
+  }
+  function load(){
+    status.textContent='טוען תכנים...';
+    feed.replaceChildren();
+    fetch('/forum/api/posts',{cache:'no-store'}).then(function(r){
+      if(!r.ok)throw new Error('לא ניתן לטעון את הפורום');
+      return r.json();
+    }).then(function(data){
+      var items=data.items||[];
+      if(!items.length){status.textContent='עדיין אין תכנים בפורום.';feed.append(node('div','empty','כשתיווצר יצירה חדשה או תתפרסם הודעה קולית, היא תופיע כאן.'));return;}
+      status.textContent='מוצגים '+items.length+' פרסומים אחרונים.';
+      items.forEach(function(item){feed.append(card(item));});
+    }).catch(function(e){status.textContent=e.message||'טעינת הפורום נכשלה.';});
+  }
+  document.getElementById('refresh').addEventListener('click',load);
+  load();
+})();
+</script>
+</body>
+</html>
