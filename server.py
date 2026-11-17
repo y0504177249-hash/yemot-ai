@@ -514,7 +514,7 @@ def smart_search_proxy(subpath):
     content_type = upstream.headers.get("Content-Type", "application/octet-stream")
     if "text/html" in content_type:
         page = body.decode(upstream.encoding or "utf-8", errors="replace")
-        page = re.sub(r'(["\\'])/(?!/)([^"\\']*)', lambda m: m.group(1) + "/smart/" + m.group(2), page)
+        page = re.sub(r"""(["'])/(?!/)([^"']*)""", lambda m: m.group(1) + "/smart/" + m.group(2), page)
         body = page.encode("utf-8")
     out = Response(body, status=upstream.status_code, content_type=content_type)
     for key in ("Cache-Control", "ETag", "Last-Modified"):
