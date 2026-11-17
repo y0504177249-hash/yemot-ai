@@ -717,6 +717,8 @@ def db_ensure_profile_columns(conn):
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS tools_enabled BOOLEAN NOT NULL DEFAULT TRUE")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS history_enabled BOOLEAN NOT NULL DEFAULT TRUE")
         cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS pin_hash TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE caller_profiles ADD COLUMN IF NOT EXISTS password_services TEXT NOT NULL DEFAULT 'website'")
 
 
 def db_save_caller(phone, profile):
@@ -3074,8 +3076,13 @@ def personal_login():
     d = request.get_json(silent=True) or {}
     phone = re.sub(r"[^0-9]", "", str(d.get("phone", "")))[:15]
     pin = str(d.get("pin", ""))
-    if not re.fullmatch(r"\d{5,15}", phone) or not re.fullmatch(r"\d{6,12}", pin):
-        return jsonify({"error": "יש להזין מספר טלפון וקוד אישי תקינים"}), 400
+    password = str(d.get("password", ""))
+    if not re.fullmatch(r"\d{5,15}", phone):
+        return jsonify({"error": "יש להזין מספר טלפון תקין"}), 400
+    if password and (len(password) < 10 or len(password) > 128):
+        return jsonify({"error": "הסיסמה אינה תקינה"}), 400
+    if not password and not re.fullmatch(r"\d{6,12}", pin):
+        return jsonify({"error": "יש להזין סיסמה או קוד אישי תקין"}), 400
     ip = client_ip()
     now = time.time()
     attempts = [t for t in _personal_ip_fails.get(ip, []) if now - t < 600]
@@ -3092,19 +3099,29 @@ def personal_login():
     try:
         with conn.cursor() as cur:
             db_ensure_profile_columns(conn)
-            cur.execute("SELECT pin_hash, enabled FROM caller_profiles WHERE phone=%s", (phone,))
+            cur.execute("SELECT pin_hash, enabled, password_hash, password_services FROM caller_profiles WHERE phone=%s", (phone,))
             row = cur.fetchone()
         conn.commit()  # Persist the additive profile migration.
-        if not row or not row[0] or not row[1] or not verify_personal_pin(pin, row[0]):
+        if not row or not row[1]:
             _personal_ip_fails[ip].append(now)
             _personal_phone_fails[phone].append(now)
-            return jsonify({"error": "מספר הטלפון או הקוד האישי שגויים"}), 401
+            return jsonify({"error": "מספר הטלפון או פרטי הכניסה שגויים"}), 401
+        password_hash = row[2] or ""
+        if password_hash:
+            services = [x.strip() for x in (row[3] or "website").split(",") if x.strip()]
+            valid = bool(password) and "website" in services and verify_personal_pin(password, password_hash)
+        else:
+            valid = bool(pin) and bool(row[0]) and verify_personal_pin(pin, row[0])
+        if not valid:
+            _personal_ip_fails[ip].append(now)
+            _personal_phone_fails[phone].append(now)
+            return jsonify({"error": "מספר הטלפון או הסיסמה שגויים"}), 401
         _personal_ip_fails.pop(ip, None)
         _personal_phone_fails.pop(phone, None)
         session.clear()
         session["personal_phone"] = phone
         session.permanent = True
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "needs_password_setup": not bool(password_hash)})
     finally:
         conn.close()
 
@@ -3126,7 +3143,7 @@ def personal_profile():
     try:
         with conn.cursor() as cur:
             db_ensure_profile_columns(conn)
-            cur.execute("SELECT phone, display_name, assigned_address, assistant_mode, tools_enabled, history_enabled FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
+            cur.execute("SELECT phone, display_name, assigned_address, assistant_mode, tools_enabled, history_enabled, password_hash, password_services FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
             row = cur.fetchone()
             if not row:
                 session.pop("personal_phone", None)
@@ -3136,7 +3153,45 @@ def personal_profile():
                 cur.execute("SELECT created_at, heard, answer, assistant_mode FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 100", (phone,))
                 transcripts = [{"created_at": x[0].isoformat(), "heard": x[1] or "", "answer": x[2] or "", "assistant_mode": x[3] or "smart"} for x in cur.fetchall()]
         conn.commit()  # Persist additive profile migration.
-        return jsonify({"profile": {"phone": row[0], "name": row[1] or "", "assigned_address": row[2] or "", "assistant_mode": row[3] or "smart", "tools_enabled": bool(row[4]), "history_enabled": bool(row[5])}, "transcripts": transcripts})
+        return jsonify({"profile": {"phone": row[0], "name": row[1] or "", "assigned_address": row[2] or "", "assistant_mode": row[3] or "smart", "tools_enabled": bool(row[4]), "history_enabled": bool(row[5]), "has_password": bool(row[6]), "password_services": [x.strip() for x in (row[7] or "website").split(",") if x.strip()]}, "transcripts": transcripts})
+    finally:
+        conn.close()
+
+
+@app.route("/personal/api/password", methods=["POST"])
+def personal_set_password():
+    phone = session.get("personal_phone")
+    if not phone:
+        return jsonify({"error": "נדרשת כניסה"}), 401
+    if request.headers.get("X-Requested-With") != "personal":
+        return jsonify({"error": "בקשה לא תקינה"}), 403
+    d = request.get_json(silent=True) or {}
+    old_password = str(d.get("old_password", ""))
+    new_password = str(d.get("new_password", ""))
+    services = d.get("services", [])
+    allowed = {"yemot-ai-1", "yemot-smart-search", "website"}
+    if not isinstance(services, list) or not services or any(x not in allowed for x in services):
+        return jsonify({"error": "יש לבחור לפחות שירות אחד"}), 400
+    if len(new_password) < 10 or len(new_password) > 128:
+        return jsonify({"error": "הסיסמה חייבת להכיל 10 עד 128 תווים"}), 400
+    conn = db_connect()
+    if conn is None:
+        return jsonify({"error": "מסד הנתונים אינו מחובר"}), 503
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                db_ensure_profile_columns(conn)
+                cur.execute("SELECT password_hash FROM caller_profiles WHERE phone=%s AND enabled=TRUE", (phone,))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "החשבון אינו פעיל"}), 403
+                if row[0] and not verify_personal_pin(old_password, row[0]):
+                    return jsonify({"error": "הסיסמה הנוכחית שגויה"}), 401
+                cur.execute(
+                    "UPDATE caller_profiles SET password_hash=%s, password_services=%s, updated_at=now() WHERE phone=%s",
+                    (pin_hash_value(new_password), ",".join(sorted(set(services))), phone),
+                )
+        return jsonify({"ok": True})
     finally:
         conn.close()
 
