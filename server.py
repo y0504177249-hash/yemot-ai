@@ -2735,6 +2735,16 @@ def forum_upload_audio(raw_audio, call_id):
     return folder + "/" + filename
 
 
+def forum_public_content_safe(title, content_text):
+    combined = str(title or "") + "\n" + str(content_text or "")
+    if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", combined):
+        return False
+    # Avoid auto-publishing obvious Israeli mobile/landline phone numbers.
+    if re.search(r"(?<!\\d)(?:\\+972[- .]?|0)(?:5\\d|[2-9])[- .]?\\d{3}[- .]?\\d{4}(?!\\d)", combined):
+        return False
+    return True
+
+
 def save_generated_forum_post(call_id, phone, title, content_text, content_type="text",
                                 audio_path="", image_data=None, image_mime=""):
     """Publish a non-private generated artifact to the shared website and phone forum."""
@@ -2742,6 +2752,9 @@ def save_generated_forum_post(call_id, phone, title, content_text, content_type=
     content_text = str(content_text or "").strip()[:20000]
     content_type = str(content_type or "text")[:30]
     if not content_text and not image_data:
+        return None
+    if not forum_public_content_safe(title, content_text):
+        print("generated forum post skipped: contact details detected", flush=True)
         return None
     if not audio_path:
         speech_text = (title + ". " + content_text)[:1800]
