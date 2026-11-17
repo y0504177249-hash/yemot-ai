@@ -219,23 +219,19 @@ PAGE = """<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">
 <style>body{font-family:system-ui,sans-serif;max-width:560px;margin:2rem auto;padding:0 16px;line-height:1.6}
 button,a.b{display:inline-block;padding:.6rem 1.1rem;margin:.3rem .3rem .3rem 0;border:1px solid #444;border-radius:8px;background:#fff;cursor:pointer;text-decoration:none;color:#000;font-size:1rem}
 #s{margin:1rem 0;padding:.8rem;background:#f3f3f3;border-radius:8px}</style></head><body>
-<h1>40 הקראות קוליות</h1><p>קול גברי בעברית (Charon). קובצי WAV מותאמים לימות: 8kHz, מונו, 16 ביט. היצירה רצה ברקע והחבילה נשמרת להורדה גם לאחר הפעלה מחדש.</p>
+<h1>40 הקראות קוליות</h1><p>קול גברי בעברית (Charon). קובצי WAV מותאמים לימות: 8kHz, מונו, 16 ביט. החבילה נשמרת במסד הנתונים להורדה גם לאחר הפעלה מחדש.</p>
+<p><strong>חשוב לגבי עלות:</strong> Gemini 3.8 Flash TTS ללא עלות במכסת Free Tier של Google. אם מפתח ה-API מחובר לפרויקט עם חיוב, השימוש עשוי להיות מחויב. היצירה לא תתחיל בלי לחיצה ואישור שלך.</p>
 <button id="go">התחל יצירה</button> <a class="b" id="zip" href="/admin/api/voicepack/zip">הורד ZIP</a>
 <div id="s">טוען...</div>
 <script>
 const H={"X-Requested-With":"admin","Content-Type":"application/json"};
-let autoStartAttempted=false;
-async function st(){try{
- const r=await fetch("/admin/api/voicepack/status");const j=await r.json();
- document.getElementById("s").textContent=j.error?j.error:(j.running?"יוצר... ":"")+j.created+" מתוך "+j.total+" קבצים"+(j.persisted?" | החבילה שמורה במסד הנתונים":"")+(j.failed&&j.failed.length?" | נכשלו: "+j.failed.join(", "):"");
- if(!autoStartAttempted&&!j.running&&j.created===0&&!j.persisted){
-  autoStartAttempted=true;
-  const sr=await fetch("/admin/api/voicepack/start",{method:"POST",headers:H,body:"{}"});
-  const sj=await sr.json();
-  if(sj.started)document.getElementById("s").textContent="היצירה התחילה אוטומטית ברקע...";
- }
-}catch(e){document.getElementById("s").textContent="שגיאת תקשורת"}}
-document.getElementById("go").onclick=async()=>{const r=await fetch("/admin/api/voicepack/start",{method:"POST",headers:H,body:"{}"});const j=await r.json();document.getElementById("s").textContent=j.started?"היצירה התחילה ברקע...": "היצירה כבר פועלת. אפשר לעקוב אחר ההתקדמות כאן.";st()};
+async function st(){try{const r=await fetch("/admin/api/voicepack/status");const j=await r.json();
+document.getElementById("s").textContent=j.error?j.error:(j.running?"יוצר... ":"")+j.created+" מתוך "+j.total+" קבצים"+(j.persisted?" | החבילה שמורה במסד הנתונים":"")+(j.failed&&j.failed.length?" | נכשלו: "+j.failed.join(", "):"");}catch(e){document.getElementById("s").textContent="שגיאת תקשורת"}}
+document.getElementById("go").onclick=async()=>{
+ if(!confirm("היצירה תשתמש במודל Gemini 3.8 Flash TTS. במכסת Free Tier היא ללא עלות; אם המפתח מחובר לפרויקט עם חיוב, ייתכן חיוב. להמשיך?"))return;
+ const r=await fetch("/admin/api/voicepack/start",{method:"POST",headers:H,body:"{}"});const j=await r.json();
+ document.getElementById("s").textContent=j.started?"היצירה התחילה ברקע...": "היצירה כבר פועלת. אפשר לעקוב אחר ההתקדמות כאן.";st()
+};
 st();setInterval(st,5000);
 </script></body></html>"""
 
