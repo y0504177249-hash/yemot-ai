@@ -3675,6 +3675,148 @@ def admin_set_personal_pin(phone):
         conn.close()
 
 
+FORUM_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "forum.html")
+
+
+@app.route("/forum")
+@app.route("/forum/")
+def public_forum_page():
+    return send_file(FORUM_HTML, mimetype="text/html")
+
+
+@app.route("/forum/api/posts")
+def public_forum_posts():
+    conn = db_connect()
+    if conn is None:
+        voice = list(_forum_memory)
+        generated = list(_forum_content_memory)
+        combined = []
+        for post in voice:
+            combined.append({
+                "id": post.get("id"), "kind": "voice", "title": "הודעה קולית",
+                "content_type": "voice", "content": "", "name": post.get("name") or "משתמש",
+                "created_at": post.get("created_at") or "", "has_audio": bool(post.get("audio_path")),
+                "has_image": False,
+            })
+        for post in generated:
+            combined.append({
+                "id": post.get("id"), "kind": "generated", "title": post.get("title") or "תוכן חדש",
+                "content_type": post.get("content_type") or "text", "content": post.get("content_text") or "",
+                "name": post.get("name") or "משתמש", "created_at": post.get("created_at") or "",
+                "has_audio": bool(post.get("audio_path")), "has_image": bool(post.get("image_data")),
+            })
+        combined.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return jsonify({"items": combined[:50]})
+    try:
+        items = []
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, display_name, created_at
+                   FROM voice_forum_posts ORDER BY created_at DESC, id DESC LIMIT 50"""
+            )
+            for row in cur.fetchall():
+                items.append({
+                    "id": row[0], "kind": "voice", "title": "הודעה קולית",
+                    "content_type": "voice", "content": "", "name": row[1] or "משתמש",
+                    "created_at": row[2].isoformat(), "has_audio": True, "has_image": False,
+                })
+            cur.execute(
+                """SELECT id, display_name, title, content_type, content_text,
+                          (audio_path <> ''), (image_data IS NOT NULL), created_at
+                   FROM forum_content_posts ORDER BY created_at DESC, id DESC LIMIT 50"""
+            )
+            for row in cur.fetchall():
+                items.append({
+                    "id": row[0], "kind": "generated", "title": row[2] or "תוכן חדש",
+                    "content_type": row[3] or "text", "content": row[4] or "",
+                    "name": row[1] or "משתמש", "created_at": row[7].isoformat(),
+                    "has_audio": bool(row[5]), "has_image": bool(row[6]),
+                })
+        items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return jsonify({"items": items[:50]})
+    except Exception as e:
+        print("public forum listing failed:", redact(e)[:160], flush=True)
+        return jsonify({"error": "טעינת הפורום נכשלה"}), 500
+    finally:
+        conn.close()
+
+
+def download_forum_audio_path(audio_path):
+    path = str(audio_path or "").strip()
+    if not path:
+        raise ValueError("missing forum audio path")
+    if path.startswith("ivr2:"):
+        yemot_path = path
+    else:
+        yemot_path = "ivr2:" + (path if path.startswith("/") else "/" + path)
+    if not yemot_path.lower().endswith(".wav"):
+        yemot_path += ".wav"
+    response = requests.get(
+        "https://www.call2all.co.il/ym/api/DownloadFile",
+        params={"token": f"{YEMOT_NUMBER}:{YEMOT_PASSWORD}", "path": yemot_path},
+        timeout=25,
+    )
+    response.raise_for_status()
+    if not response.content:
+        raise RuntimeError("empty forum audio")
+    return response.content
+
+
+@app.route("/forum/api/posts/<kind>/<int:post_id>/audio")
+def public_forum_audio(kind, post_id):
+    conn = db_connect()
+    if conn is None:
+        memory = _forum_memory if kind == "voice" else _forum_content_memory
+        item = next((post for post in memory if int(post.get("id") or 0) == post_id), None)
+        if not item:
+            return jsonify({"error": "קובץ השמע לא נמצא"}), 404
+        audio_path = item.get("audio_path")
+    else:
+        try:
+            with conn.cursor() as cur:
+                if kind == "voice":
+                    cur.execute("SELECT audio_path FROM voice_forum_posts WHERE id=%s", (post_id,))
+                elif kind == "generated":
+                    cur.execute("SELECT audio_path FROM forum_content_posts WHERE id=%s", (post_id,))
+                else:
+                    return jsonify({"error": "סוג פרסום לא תקין"}), 400
+                row = cur.fetchone()
+            if not row or not row[0]:
+                return jsonify({"error": "קובץ השמע לא נמצא"}), 404
+            audio_path = row[0]
+        finally:
+            conn.close()
+    try:
+        raw = download_forum_audio_path(audio_path)
+        return send_file(io.BytesIO(raw), mimetype="audio/wav", as_attachment=False,
+                         download_name=f"forum-{kind}-{post_id}.wav", max_age=60)
+    except Exception as e:
+        print("public forum audio failed:", redact(e)[:160], flush=True)
+        return jsonify({"error": "השמעת קובץ השמע נכשלה"}), 502
+
+
+@app.route("/forum/api/posts/<int:post_id>/image")
+def public_forum_image(post_id):
+    conn = db_connect()
+    if conn is None:
+        item = next((post for post in _forum_content_memory if int(post.get("id") or 0) == post_id), None)
+        if not item or not item.get("image_data"):
+            return jsonify({"error": "התמונה לא נמצאה"}), 404
+        raw, mime_type = item["image_data"], item.get("image_mime") or "image/png"
+    else:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT image_data, image_mime FROM forum_content_posts WHERE id=%s", (post_id,))
+                row = cur.fetchone()
+            if not row or not row[0]:
+                return jsonify({"error": "התמונה לא נמצאה"}), 404
+            raw, mime_type = bytes(row[0]), row[1] or "image/png"
+        finally:
+            conn.close()
+    return send_file(io.BytesIO(raw), mimetype=mime_type, as_attachment=False,
+                     download_name=f"forum-image-{post_id}", max_age=300)
+
+
 @app.route("/admin")
 @app.route("/admin/")
 def admin_page():
