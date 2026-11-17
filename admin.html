@@ -510,7 +510,9 @@
       h('h2', null, 'הודעות שמע'),
       h('p', { class: 'sub' }, 'העלה קובצי MP3 או ZIP של הודעות המערכת. הקבצים נשמרים במסד הנתונים ומופרדים בין הפרויקטים.'),
       h('label', { class: 'f' }, 'בחירת קובץ ZIP או MP3'), picker,
-      h('div', { class: 'bar' }, h('button', { type: 'button', onclick: upload }, 'העלאת הודעות שמע')),
+      h('div', { class: 'bar' },
+        h('button', { type: 'button', onclick: upload }, 'העלאת הודעות שמע'),
+        h('button', { type: 'button', class: 'quiet', onclick: function () { window.open('/admin/voicepack', '_blank', 'noopener'); } }, 'יצירת 40 הקראות קוליות')),
       status, rows);
     loadAudio();
     return section;
