@@ -1942,6 +1942,25 @@ def prepare_image_email(call_id, phone, action):
     return "יצרתי את התמונה. אני עומד לשלוח אותה " + target + speak_email(c["email"]) + ". האם לשלוח? אמור כן או לא."
 
 
+CREATION_ACTIONS = {
+    "podcast", "image", "writing", "planning", "research",
+    "utility_translation", "utility_research",
+}
+
+
+def default_tool_clarification(action):
+    questions = {
+        "podcast": "כדי להכין הסכת מתאים, למי הוא מיועד, כמה זמן הוא צריך להימשך, איזה סגנון תרצה ואילו נושאים חשוב לכלול?",
+        "image": "כדי לדייק את התמונה, מה הנושא, איזה סגנון וצבעים תרצה, לאיזה שימוש היא מיועדת ולאיזו כתובת לשלוח אותה?",
+        "writing": "כדי לכתוב בדיוק מה שצריך, מי קהל היעד, מה מטרת הטקסט, מה האורך הרצוי ואיזה סגנון וטון תעדיף?",
+        "planning": "כדי לבנות תוכנית מתאימה, מה היעד, מה מסגרת הזמן, אילו מגבלות יש ומה סדר העדיפויות?",
+        "research": "כדי למקד את המחקר, על איזה היבט להתמקד, לאיזו תקופה, מה עומק הפירוט ומה תרצה לקבל בסיום?",
+        "utility_translation": "כדי לדייק את התרגום, מה שפת המקור, מה שפת היעד והאם לשמור על ניסוח מילולי או טבעי?",
+        "utility_research": "כדי למקד את החיפוש, איזה מידע בדיוק דרוש, לאיזה אזור או תקופה, וכמה פירוט אתה צריך?",
+    }
+    return questions.get(action, "כדי להכין תוצאה מדויקת, מה המטרה, למי היא מיועדת, מה היקף התוצר ואילו פרטים חשוב לכלול?")
+
+
 def ask_gemini(call_id, audio_bytes, phone=""):
     assistant_mode = getattr(_tls, "assistant_mode", "smart")
     history_key = (call_id, assistant_mode)
@@ -1976,10 +1995,36 @@ def ask_gemini(call_id, audio_bytes, phone=""):
     confirm = data.get("confirm_pending")
     create_podcast = data.get("create_podcast")
     create_image = data.get("create_image")
+    map_request = data.get("map_request")
+    clarification_question = (data.get("clarification_question") or "").strip()
+    forum_content = data.get("forum_content")
     return_to_menu = bool(data.get("return_to_menu"))
+    tool_action = getattr(_tls, "tool_action", "") or ""
+    suppress_actions = False
+    with lock:
+        tool_state = calls.get(call_id)
+        clarification_already_asked = bool(tool_state and tool_state.get("tool_clarifications_done"))
+    if assistant_mode == "tools" and tool_action in CREATION_ACTIONS and not clarification_already_asked:
+        # Always collect focused details once before making a creative artifact.
+        answer = clarification_question or default_tool_clarification(tool_action)
+        suppress_actions = True
+        with lock:
+            tool_state = calls.get(call_id)
+            if tool_state is not None:
+                tool_state["tool_clarifications_done"] = True
+                tool_state["tool_clarification_waiting"] = True
+    elif clarification_question and assistant_mode == "tools" and tool_action:
+        answer = clarification_question
+        suppress_actions = True
+        with lock:
+            tool_state = calls.get(call_id)
+            if tool_state is not None:
+                tool_state["tool_clarification_waiting"] = True
 
     try:
-        if mail_ok and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
+        if suppress_actions:
+            pass
+        elif mail_ok and (confirm or isinstance(send, dict) or isinstance(mail, dict)):
             print(f"mail request from {phone or 'unknown'}", flush=True)
             _tls.kind = "mail"
             if not mail_enabled_for(phone):
@@ -2005,6 +2050,43 @@ def ask_gemini(call_id, audio_bytes, phone=""):
             else:
                 _tls.kind = "image"
                 answer = prepare_image_email(call_id, phone, create_image)
+        elif tool_action == "utility_map":
+            if not tools_allowed:
+                answer = "אין לך הרשאה להשתמש בכלי מפות"
+            elif not isinstance(map_request, dict):
+                answer = clarification_question or "כדי לחשב מסלול, אמור במשפט אחד מוצא, יעד, מועד יציאה או הגעה, והאם מדובר בתחבורה ציבורית או הליכה."
+                with lock:
+                    tool_state = calls.get(call_id)
+                    if tool_state is not None:
+                        tool_state["tool_clarification_waiting"] = True
+            else:
+                _tls.kind = "map"
+                answer = compute_map_route(map_request)
+                if answer.startswith("חסרים פרטי מסלול") or answer.startswith("לא הצלחתי להבין את מועד"):
+                    with lock:
+                        tool_state = calls.get(call_id)
+                        if tool_state is not None:
+                            tool_state["tool_clarification_waiting"] = True
+        elif isinstance(forum_content, dict) and tool_action in CREATION_ACTIONS:
+            if not tools_allowed:
+                answer = "אין לך הרשאה להשתמש בכלי יצירת תוכן"
+            else:
+                title = str(forum_content.get("title") or "תוכן חדש")[:120]
+                content_text = str(forum_content.get("content") or "").strip()[:20000]
+                content_type = str(forum_content.get("content_type") or "text")[:30]
+                if content_text:
+                    published = save_generated_forum_post(
+                        call_id, phone, title, content_text, content_type=content_type
+                    )
+                    answer = (str(data.get("answer") or "").strip() or
+                              ("התוכן נוצר ופורסם בפורום." if published else "התוכן נוצר, אך לא הצלחתי לפרסם אותו בפורום."))
+        elif tool_action == "writing" and assistant_mode == "tools" and answer and not forum_content:
+            # The writing tool creates a public-ready draft unless the model marked it private.
+            published = save_generated_forum_post(
+                call_id, phone, "טקסט חדש", answer, content_type="text"
+            )
+            if published:
+                answer = "הטקסט נוצר ונוסף לפורום באתר ובקו."
         elif isinstance(lookup, dict) and (lookup.get("query") or heard):
             if not tools_allowed:
                 answer = "אין לך הרשאה להשתמש בכלי AI"
