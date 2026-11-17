@@ -2,9 +2,7 @@ name: Python syntax check
 
 on:
   pull_request:
-    branches: [deploy/yemot-smart-search]
   push:
-    branches: [deploy/yemot-smart-search]
 
 jobs:
   compile:
