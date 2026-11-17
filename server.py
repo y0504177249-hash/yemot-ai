@@ -2176,7 +2176,10 @@ def transcribe_caller_name(recorded, phone, use_yiddish):
 
 
 def worker_name(call_id, recorded, phone, use_yiddish):
-    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if use_yiddish else "/8")
+    state = calls.get(call_id) or {}
+    fallback = "/1/1" if use_yiddish else "/8"
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or fallback
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in all_keys() else "default"
     name = transcribe_caller_name(recorded, phone, use_yiddish)
@@ -2199,7 +2202,10 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None, t
     _tls.assistant_mode = assistant_mode or ("yiddish" if _tls.yiddish else "smart")
     _tls.tool_action = tool_action or ""
     _tls.phone = phone
-    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or ("/1/1" if _tls.yiddish else "/8")
+    state = calls.get(call_id) or {}
+    fallback = "/1/1" if _tls.yiddish else "/8"
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or fallback
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     t0 = time.time()
     failed = False
     err = ""
@@ -2881,7 +2887,9 @@ def forum_recent_posts(limit=8):
 def forum_worker(call_id, recorded, phone):
     state = calls.get(call_id)
     _tls.phone = phone
-    _tls.record_path = _tls.extension_path = (state or {}).get("ext_path") or "/8"
+    state = state or {}
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or "/8"
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     try:
         original = download_recording(recorded)
         altered = forum_distort_voice(original)
@@ -3013,7 +3021,9 @@ def _save_profile(phone, **changes):
 
 def worker_rename(call_id, recorded, phone):
     _tls.phone = phone
-    _tls.record_path = _tls.extension_path = (calls.get(call_id) or {}).get("ext_path") or "/7"
+    state = calls.get(call_id) or {}
+    _tls.record_path = state.get("record_path") or state.get("ext_path") or "/7"
+    _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
     _tls.client = client_for(phone)
     _tls.keyid = phone if phone in all_keys() else "default"
     name = transcribe_caller_name(recorded, phone, False)
@@ -3227,6 +3237,7 @@ def ivr():
         _tls.extension_path = ext_path
     else:
         # בכניסה הראשית מקליטים בתיקייה 8, אך חוזרים לשורש התפריט לאחר המתנה.
+        ext_path = EXTENSION_PATH
         _tls.record_path = "/1/1" if use_yiddish else RECORD_PATH
         _tls.extension_path = EXTENSION_PATH
     maybe_refresh()
@@ -3280,7 +3291,9 @@ def ivr():
         st = calls.setdefault(
             call_id,
             {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
-             "voice": voice_index_for(phone, assistant_mode), "audio": None, "ext_path": ext_path},
+             "voice": voice_index_for(phone, assistant_mode), "audio": None,
+             "ext_path": ext_path, "record_path": active_record_path(),
+             "extension_path": active_extension_path()},
         )
         # The greeting uses the latest saved turn; ask_gemini loads the full
         # assistant-specific context lazily after the caller chooses an assistant.
