@@ -14,6 +14,9 @@ import threading
 import collections
 import requests
 import flask
+import html as html_module
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import voicepack
 from urllib.parse import urlencode
 try:
@@ -36,6 +39,7 @@ except ImportError:
 YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 AUDIO_PROJECT = os.environ.get("AUDIO_PROJECT", "yemot-ai-1").strip() or "yemot-ai-1"
 # מפתח Gemini נפרד לכל מתקשר (לפי מספר טלפון), כדי שלכל אדם תהיה מכסה משלו. למשל {"0501234567": "AIza..."}
@@ -194,6 +198,7 @@ _store = {"settings": {}, "callers": {}, "loaded": 0.0, "source": "env", "error"
 _store_lock = threading.Lock()
 events = collections.deque(maxlen=100)
 _forum_memory = collections.deque(maxlen=50)
+_forum_content_memory = collections.deque(maxlen=100)
 
 
 def settings_defaults():
@@ -260,6 +265,7 @@ def redact(text):
         ADMIN_PASSWORD if "ADMIN_PASSWORD" in globals() else "",
         GEMINI_KEY_ENCRYPTION_KEY if "GEMINI_KEY_ENCRYPTION_KEY" in globals() else "",
         GEMINI_API_KEY,
+        GOOGLE_MAPS_API_KEY if "GOOGLE_MAPS_API_KEY" in globals() else "",
     ]
     try:
         secrets.extend(all_keys().values())
@@ -548,6 +554,19 @@ def db_init(conn):
                 audio_path TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
             cur.execute("CREATE INDEX IF NOT EXISTS voice_forum_posts_created_idx ON voice_forum_posts(created_at DESC)")
+            cur.execute("""CREATE TABLE IF NOT EXISTS forum_content_posts (
+                id BIGSERIAL PRIMARY KEY,
+                source_call_id TEXT NOT NULL DEFAULT '',
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT 'משתמש',
+                title TEXT NOT NULL DEFAULT 'תוכן חדש',
+                content_type TEXT NOT NULL DEFAULT 'text',
+                content_text TEXT NOT NULL DEFAULT '',
+                audio_path TEXT NOT NULL DEFAULT '',
+                image_data BYTEA,
+                image_mime TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            cur.execute("CREATE INDEX IF NOT EXISTS forum_content_posts_created_idx ON forum_content_posts(created_at DESC)")
             cur.execute("""CREATE TABLE IF NOT EXISTS admin_audio_files (
                 project_key TEXT NOT NULL,
                 filename TEXT NOT NULL,
