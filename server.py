@@ -13,6 +13,8 @@ import functools
 import threading
 import collections
 import requests
+import flask
+import voicepack
 from urllib.parse import urlencode
 try:
     import psycopg
@@ -1390,11 +1392,15 @@ def voice_index_for(phone, mode=""):
 
 def tts_wav(text, voice):
     last_err = None
-    for name in TTS_MODELS:
+    for name in (getattr(_tls, "tts_models_override", None) or TTS_MODELS):
         if _is_bad(name):
             continue
         try:
-            style = MODE_TTS_STYLES.get(getattr(_tls, "assistant_mode", ""), "") or (YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE)
+            style = (
+                "Speak Hebrew in a clear, warm, natural adult male voice, at a measured pace, with crisp pronunciation and short pauses. This is a telephone system announcement."
+                if getattr(_tls, "voicepack_tts", False)
+                else MODE_TTS_STYLES.get(getattr(_tls, "assistant_mode", ""), "") or (YIDDISH_TTS_STYLE if yiddish_mode() else TTS_STYLE)
+            )
             interaction = cur_client().interactions.create(
                 model=name,
                 input=[{
@@ -4179,6 +4185,91 @@ def db_inventory_log(conn):
         print("DB inventory: " + " ".join(parts), flush=True)
     except Exception as e:
         print("DB inventory failed:", type(e).__name__, flush=True)
+
+
+def voicepack_tts(text, voice):
+    # Generate prerecorded prompts only with Google's free-tier TTS model;
+    # do not fall back to an environment-selected model that may be billed.
+    previous_models = getattr(_tls, "tts_models_override", None)
+    previous_flag = getattr(_tls, "voicepack_tts", False)
+    _tls.tts_models_override = ["gemini-3.8-flash-tts"]
+    _tls.voicepack_tts = True
+    try:
+        return tts_wav(text, voice)
+    finally:
+        if previous_models is None:
+            try:
+                delattr(_tls, "tts_models_override")
+            except AttributeError:
+                pass
+        else:
+            _tls.tts_models_override = previous_models
+        _tls.voicepack_tts = previous_flag
+
+
+def save_voicepack_archive(archive, state):
+    conn = db_connect()
+    if conn is None:
+        print("voicepack archive not persisted: database unavailable", flush=True)
+        return False
+    try:
+        status_bytes = json.dumps(state, ensure_ascii=False).encode("utf-8")
+        with conn.transaction():
+            with conn.cursor() as cur:
+                for filename, content_type, data in (
+                    ("yemot-voicepack.zip", "application/zip", archive),
+                    ("yemot-voicepack-status.json", "application/json", status_bytes),
+                ):
+                    cur.execute(
+                        """INSERT INTO admin_audio_files
+                           (project_key, filename, content_type, data, size_bytes, created_at)
+                           VALUES ('voicepack', %s, %s, %s, %s, now())
+                           ON CONFLICT (project_key, filename) DO UPDATE SET
+                           content_type=EXCLUDED.content_type, data=EXCLUDED.data,
+                           size_bytes=EXCLUDED.size_bytes, created_at=now()""",
+                        (filename, content_type, data, len(data)),
+                    )
+        print("voicepack archive saved to database:", len(archive), "bytes", flush=True)
+        return True
+    except Exception as e:
+        print("voicepack archive save failed:", redact(e)[:180], flush=True)
+        return False
+    finally:
+        conn.close()
+
+
+def load_voicepack_archive():
+    conn = db_connect()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT filename, data FROM admin_audio_files
+                   WHERE project_key='voicepack'
+                   AND filename IN ('yemot-voicepack.zip', 'yemot-voicepack-status.json')"""
+            )
+            rows = cur.fetchall()
+        saved = {name: bytes(data) for name, data in rows}
+        archive = saved.get("yemot-voicepack.zip")
+        status_data = None
+        if saved.get("yemot-voicepack-status.json"):
+            try:
+                status_data = json.loads(saved["yemot-voicepack-status.json"].decode("utf-8"))
+            except Exception:
+                status_data = None
+        return {"archive": archive, "status": status_data}
+    except Exception as e:
+        print("voicepack archive load failed:", redact(e)[:180], flush=True)
+        return None
+    finally:
+        conn.close()
+
+
+voicepack.register(
+    app, admin_required, voicepack_tts, flask,
+    on_complete=save_voicepack_archive, load_archive=load_voicepack_archive,
+)
 
 
 # Run additive schema setup during startup rather than waiting for the first
