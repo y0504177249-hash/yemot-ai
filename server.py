@@ -1766,7 +1766,7 @@ def compute_map_route(map_request):
                 stops = transit.get("stopDetails") or {}
                 departure_stop = (stops.get("departureStop") or {}).get("name") or "התחנה הקרובה"
                 arrival_stop = (stops.get("arrivalStop") or {}).get("name") or "תחנת היעד"
-                line_name = line.get("shortName") or line.get("name") or "תחבורה ציבורית"
+                line_name = line.get("nameShort") or line.get("shortName") or line.get("name") or "תחבורה ציבורית"
                 vehicle = (line.get("vehicle") or {}).get("name") or ""
                 headsign = transit.get("headsign") or ""
                 detail = f"עלה על {vehicle + ' ' if vehicle else ''}{line_name} בתחנת {departure_stop}"
@@ -1786,9 +1786,13 @@ def compute_map_route(map_request):
                 instructions.append(instruction)
         if not instructions:
             return "שירות המפות מצא מסלול אך לא החזיר הוראות מפורטות. נסה שוב מאוחר יותר."
-        if mode == "WALK" and time_kind == "arrival" and duration_seconds:
-            departure = requested_time - timedelta(seconds=duration_seconds)
-            time_line = f"כדי להגיע בסביבות {requested_time.strftime('%H:%M')}, צא להליכה בסביבות {departure.strftime('%H:%M')}."
+        if mode == "WALK" and duration_seconds:
+            if time_kind == "arrival":
+                departure = requested_time - timedelta(seconds=duration_seconds)
+                time_line = f"כדי להגיע בסביבות {requested_time.strftime('%H:%M')}, צא להליכה בסביבות {departure.strftime('%H:%M')}."
+            else:
+                arrival = requested_time + timedelta(seconds=duration_seconds)
+                time_line = f"צא להליכה בשעה {requested_time.strftime('%H:%M')}; ההגעה המשוערת היא בסביבות {arrival.strftime('%H:%M')}."
         elif time_kind == "departure":
             time_line = f"שעת היציאה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
         else:
