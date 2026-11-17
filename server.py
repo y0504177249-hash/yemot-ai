@@ -40,6 +40,8 @@ YEMOT_NUMBER = os.environ["YEMOT_NUMBER"]
 YEMOT_PASSWORD = os.environ["YEMOT_PASSWORD"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+# Maps routing is billable; require an explicit opt-in in addition to the API key.
+GOOGLE_MAPS_ROUTES_ENABLED = os.environ.get("GOOGLE_MAPS_ROUTES_ENABLED", "0") == "1"
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 AUDIO_PROJECT = os.environ.get("AUDIO_PROJECT", "yemot-ai-1").strip() or "yemot-ai-1"
 # מפתח Gemini נפרד לכל מתקשר (לפי מספר טלפון), כדי שלכל אדם תהיה מכסה משלו. למשל {"0501234567": "AIza..."}
@@ -1697,11 +1699,11 @@ def _map_local_datetime(value):
 
 def compute_map_route(map_request):
     """Return verified, provider-calculated route steps; never improvise directions."""
-    if not GOOGLE_MAPS_API_KEY:
+    if not GOOGLE_MAPS_ROUTES_ENABLED or not GOOGLE_MAPS_API_KEY:
         return (
-            "כלי המפות עדיין לא מחובר לשירות מסלולים. "
-            "כדי לקבל הוראות אמיתיות שלב אחר שלב, מנהל המערכת צריך להגדיר בשרת "
-            "מפתח Google Maps Routes API."
+            "כלי המפות עדיין לא הופעל. חישוב מסלולים משתמש ב-Google Maps Routes API ועלול להיות כרוך בתשלום. "
+            "כדי להפעיל אותו, מנהל המערכת צריך להגדיר GOOGLE_MAPS_API_KEY ולהפעיל במפורש "
+            "את GOOGLE_MAPS_ROUTES_ENABLED."
         )
     origin = str(map_request.get("origin") or "").strip()[:300]
     destination = str(map_request.get("destination") or "").strip()[:300]
