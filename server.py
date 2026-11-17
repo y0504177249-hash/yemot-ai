@@ -48,10 +48,12 @@ YIDDISH_MODE = os.environ.get("YIDDISH_MODE", "0") == "1"
 
 def yiddish_mode():
     return getattr(_tls, "yiddish", YIDDISH_MODE)
-# תיקייה לשמירת ההקלטות בימות המשיח
+# תיקייה לשמירת ההקלטות בימות המשיח. שלוחה 8 נשארת תיקיית הקלטות בלבד.
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
-# שלוחה שאליה חוזרים בזמן ההמתנה (השלוחה הזו)
-EXTENSION_PATH = os.environ.get("EXTENSION_PATH", "/8")
+# במהלך המתנה חוזרים לכניסה הראשית של הקו, ולא לשלוחה 8.
+EXTENSION_PATH = os.environ.get("EXTENSION_PATH", "/").strip() or "/"
+if EXTENSION_PATH.strip("/") == "8":
+    EXTENSION_PATH = "/"
 # קובץ מנגינת המתנה בימות המשיח, למשל /8/music (בלי סיומת). אם ריק, מושמעת הודעת "נא להמתין"
 MUSIC_FILE = os.environ.get("MUSIC_FILE", "").strip()
 # מצב בדיקה: אם TEST_MODE=1 השרת רק מקריא משפט פשוט
@@ -404,21 +406,22 @@ def persist(section, value):
 
 app = Flask(__name__)
 
-# יצירה ועדכון של שש שלוחות AI בימות המשיח, לפי סגנון ושפה קבועים.
-# מפעילים פעם אחת באמצעות CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS=1 ב-Render.
+# מגדירים כניסה ראשית אחת בלבד בשורש הקו. שלוחות ישנות מפנות אליה,
+# ושלוחה 8 נשארת תיקיית ההקלטות ואינה עוד תפריט ראשי.
+# מפעילים באמצעות CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS=1 ב-Render.
 if os.environ.get("CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS") == "1":
     yemot_extensions = (
-        ("ivr2:1", "he", "smart", "רודי חכם"),
-        ("ivr2:2", "he", "edgy", "רודי עוקצן"),
-        ("ivr2:3", "he", "psychologist", "פסיכולוגית"),
-        ("ivr2:4", "he", "yeshiva", "ראש ישיבה"),
-        ("ivr2:5", "yi", "yiddish", "משפיע באידיש"),
-        ("ivr2:6", "he", "tools", "מרכז כלי AI"),
-        ("ivr2:7", "he", "personal", "אזור אישי"),
-        # Keep existing entry points working with the requested reassignment.
-        ("ivr2:1/1", "yi", "yiddish", "משפיע באידיש"),
-        ("ivr2:8", "he", "menu", "תפריט ראשי"),
-        ("ivr2:0", "he", "central", "עוזר AI מרכזי"),
+        ("ivr2:", "he", "menu", "התפריט הראשי"),
+        ("ivr2:0", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:1", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:2", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:3", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:4", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:5", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:6", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:7", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:8", "he", "redirect", "מעבר לתפריט הראשי"),
+        ("ivr2:1/1", "yi", "redirect", "מעבר לתפריט הראשי"),
     )
     for extension_path, language, mode, title in yemot_extensions:
         try:
@@ -435,7 +438,10 @@ if os.environ.get("CONFIGURE_YEMOT_ASSISTANT_EXTENSIONS") == "1":
                 timeout=20,
             )
             setup_response.raise_for_status()
-            print(f"Yemot {extension_path} mode={mode} language={language} update:", redact(setup_response.text)[:500], flush=True)
+            setup_result = setup_response.json()
+            if setup_result.get("responseStatus") != "OK":
+                raise RuntimeError("Yemot returned a non-OK response")
+            print(f"Yemot {extension_path} mode={mode} language={language} update: OK", flush=True)
         except Exception as setup_error:
             print(f"Yemot {extension_path} update failed:", redact(setup_error)[:300], flush=True)
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20000))
@@ -1532,7 +1538,8 @@ def upload_hold_music():
         return
     filename = MUSIC_FILE.rsplit("/", 1)[-1]
     filename = filename if filename.lower().endswith(".wav") else filename + ".wav"
-    folder = EXTENSION_PATH.rstrip("/") or "/"
+    # Keep hold music beside the recordings, independently of the return-to-menu path.
+    folder = RECORD_PATH.rstrip("/") or "/"
     path = (folder + "/" + filename) if folder != "/" else "/" + filename
     wav_bytes = make_hold_music()
     response = requests.post(
@@ -2827,15 +2834,20 @@ def ivr():
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
     api_ext = re.sub(r"[^0-9/]", "", str(p.get("ApiExtension", ""))).strip("/")
-    ext_path = ("/" + api_ext) if api_ext else ("/1/1" if use_yiddish else "/8")
-    _tls.record_path = ext_path
-    _tls.extension_path = ext_path
+    if api_ext:
+        ext_path = "/" + api_ext
+        _tls.record_path = ext_path
+        _tls.extension_path = ext_path
+    else:
+        # בכניסה הראשית מקליטים בתיקייה 8, אך חוזרים לשורש התפריט לאחר המתנה.
+        _tls.record_path = "/1/1" if use_yiddish else RECORD_PATH
+        _tls.extension_path = EXTENSION_PATH
     maybe_refresh()
     db_load_caller(phone)
     assistant_mode = requested_mode if requested_mode in allowed_modes else (caller(phone).get("assistant_mode") or ("yiddish" if use_yiddish else "smart"))
-    # All phone entry extensions converge on the single main menu (extension 8).
-    # The menu's internal keypad choices route to assistants, tools, utilities,
-    # personal area, management, forum, and conversation resume.
+    # All public entry points converge on the single main menu at the system root.
+    # Its internal keypad choices route to assistants, AI tools, utilities, personal area,
+    # management, voice forum, and conversation resume. Extension 8 is only for recordings.
     # Keep the explicit personal mode for the authenticated admin web/phone flow.
     if requested_mode == "personal":
         assistant_mode = "personal"
@@ -2850,6 +2862,13 @@ def ivr():
         for history_key in [key for key in _history_loaded if key[0] == call_id]:
             _history_loaded.discard(history_key)
         return Response("", mimetype="text/plain")
+
+    # כניסה ישנה (כולל שלוחה 8) רק מעבירה לשורש; היא אינה מציגה תפריט נוסף.
+    if requested_mode == "redirect":
+        return Response(
+            "id_list_message=t-מעבירים אותך לתפריט הראשי&go_to_folder=/",
+            mimetype="text/plain",
+        )
 
     if TEST_MODE:
         return Response("id_list_message=t-שלום זו בדיקה של המערכת", mimetype="text/plain")
