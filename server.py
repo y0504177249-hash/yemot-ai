@@ -1879,21 +1879,28 @@ def create_podcast_audio(call_id, payload):
         return "ההסכת ארוך מדי ליצירה אחת. בקש פרק קצר יותר."
     wav = podcast_tts_wav(clean)
     title = str(payload.get("title") or "הסכת חדש")[:100]
-    path = forum_upload_audio(wav, call_id)
     dialogue_text = "\n".join(
         ("מגיש ראשון: " if item["speaker"] == "Host1" else "מגיש שני: ") + item["text"]
         for item in clean
     )
-    save_generated_forum_post(
-        call_id, getattr(_tls, "phone", ""), title, dialogue_text,
-        content_type="podcast", audio_path=path,
+    public_safe = forum_public_content_safe(title, dialogue_text)
+    path = forum_upload_audio(wav, call_id) if public_safe else upload_to_yemot(
+        wav, "pod" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
     )
+    published = None
+    if public_safe:
+        published = save_generated_forum_post(
+            call_id, getattr(_tls, "phone", ""), title, dialogue_text,
+            content_type="podcast", audio_path=path,
+        )
     with lock:
         st = calls.get(call_id)
         if st is not None:
             st["generated_audio"] = path
             st["podcast_title"] = title
-    return "ההסכת נוצר ופורסם בפורום שבאתר ובקו. הקובץ מוכן להאזנה."
+    if published:
+        return "ההסכת נוצר ופורסם בפורום שבאתר ובקו. הקובץ מוכן להאזנה."
+    return "ההסכת נוצר. בגלל פרטי קשר או מידע פרטי בתוכן, הוא לא פורסם בפורום, אך הקובץ מוכן להאזנה."
 
 
 def generate_image_bytes(prompt):
