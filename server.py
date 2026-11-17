@@ -2737,10 +2737,10 @@ def forum_upload_audio(raw_audio, call_id):
 
 def forum_public_content_safe(title, content_text):
     combined = str(title or "") + "\n" + str(content_text or "")
-    if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", combined):
+    if re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", combined):
         return False
     # Avoid auto-publishing obvious Israeli mobile/landline phone numbers.
-    if re.search(r"(?<!\\d)(?:\\+972[- .]?|0)(?:5\\d|[2-9])[- .]?\\d{3}[- .]?\\d{4}(?!\\d)", combined):
+    if re.search(r"(?<!\d)(?:\+972[- .]?|0)(?:5\d|[2-9])[- .]?\d{3}[- .]?\d{4}(?!\d)", combined):
         return False
     return True
 
