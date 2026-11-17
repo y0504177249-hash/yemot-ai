@@ -987,7 +987,8 @@ def admin_menu_text(message=""):
     return (prefix + f"תפריט ניהול. מצב העוזר: {enabled}. קול: {voice}. "
             "לבדיקת מצב הקש 1. להפעלה או כיבוי של העוזר הקש 2. למענה קולי הקש 3. "
             "להחלפת קול ברירת המחדל הקש 4. להתראות ושגיאות הקש 5. לתמלולי שיחות אחרונות הקש 6. "
-            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8. לחזרה לאזור האישי הקש 0.")
+            "לחסימת משתמש הקש 7. ולפתיחת חסימה הקש 8. לחזרה לאזור האישי הקש 0. "
+            "לחזרה לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית.")
 
 
 def admin_status_text():
@@ -1739,16 +1740,19 @@ def prepare_image_email(call_id, phone, action):
 
 
 def ask_gemini(call_id, audio_bytes, phone=""):
-    history = histories.setdefault(call_id, [])
     assistant_mode = getattr(_tls, "assistant_mode", "smart")
+    history_key = (call_id, assistant_mode)
+    history = histories.setdefault(history_key, [])
     history_enabled = caller(phone).get("history_enabled", True) is not False
-    if phone and history_enabled and call_id not in _history_loaded:
+    # Load context separately for each assistant. A menu call may start in "menu"
+    # and select a different assistant later in the same phone call.
+    if phone and history_enabled and history_key not in _history_loaded:
         for heard_old, answer_old in db_load_history(phone, assistant_mode):
             if heard_old:
                 history.append(types.Content(role="user", parts=[types.Part(text=heard_old)]))
                 history.append(types.Content(role="model", parts=[types.Part(text=answer_old)]))
         history[:] = history[-12:]
-        _history_loaded.add(call_id)
+        _history_loaded.add(history_key)
     parts = [types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")]
     with lock:
         st0 = calls.get(call_id)
@@ -1955,8 +1959,11 @@ def cleanup_old():
     now = time.time()
     for cid in [c for c, s in calls.items() if now - s["t"] > 3600]:
         calls.pop(cid, None)
-        histories.pop(cid, None)
-        _history_loaded.discard(cid)
+        # Conversation histories are isolated by call and assistant.
+        for history_key in [key for key in histories if key[0] == cid]:
+            histories.pop(history_key, None)
+        for history_key in [key for key in _history_loaded if key[0] == cid]:
+            _history_loaded.discard(history_key)
 
 
 ADMIN_PHONES = [re.sub(r"\D", "", x) for x in os.environ.get("ADMIN_PHONES", "").split(",") if re.sub(r"\D", "", x)]
@@ -2020,8 +2027,29 @@ def tools_menu_text():
         "ליצירת תמונה ושליחתה למייל הקש שלוש. "
         "לקריאת קובץ באמצעות בינה מלאכותית הקש ארבע. "
         "לכתיבה וניסוח הקש חמש. לחיפוש ומחקר הקש שש. "
-        "לתכנון וחישובים הקש שבע. לשמיעת התפריט מחדש הקש תשע."
+        "לתכנון וחישובים הקש שבע. לשמיעת התפריט מחדש הקש תשע. "
+        "לחזרה לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית."
     )
+
+
+def return_to_main_menu(st):
+    st["menu_stage"] = "root"
+    st["main_menu"] = True
+    st["pa_mode"] = "menu"
+    st["is_admin"] = False
+    st["awaiting"] = False
+    st["tools_chat"] = False
+    st["tools_busy"] = False
+    st["tools_recording"] = False
+    st["forum_busy"] = False
+    st["forum_recording"] = False
+    st["status"] = "idle"
+    st["last"] = None
+    st.pop("tools_action", None)
+    st.pop("tools_prompt", None)
+    st.pop("utility_action", None)
+    st["turn"] += 1
+    return _digits(st, main_menu_text())
 
 
 def tools_area(st, p, call_id, phone, recorded, use_yiddish):
@@ -2064,6 +2092,8 @@ def tools_area(st, p, call_id, phone, recorded, use_yiddish):
     if st.get("awaiting"):
         st["awaiting"] = False
         val = (p.get(st.get("field", "")) or "").strip()
+        if val in ("*", "#"):
+            return return_to_main_menu(st)
         if val == "0":
             st["tools_chat"] = True
             st["tools_action"] = ""
@@ -2113,7 +2143,8 @@ def main_menu_text(message=""):
         "לפורום הקולי בעיוות קול הקש שש. "
         "להמשך השיחה האחרונה שלך הקש שבע. "
         "לעוזר המרכזי עם גישה לכל הכלים הקש אפס. "
-        "לשמיעת התפריט מחדש הקש תשע."
+        "לשמיעת התפריט מחדש הקש תשע. "
+        "למעבר לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית."
     )
 
 
@@ -2145,7 +2176,7 @@ def assistants_menu_text(message=""):
         "לבינה החכמה הקש אחת. לבינה הישירה הקש שתיים. "
         "לבינה לשיחה והקשבה הקש שלוש. לבינת הישיבה הקש ארבע. "
         "לבינה ביידיש הקש חמש. למפת האישיות הקש שש. "
-        "לחזרה לתפריט הראשי הקש אפס."
+        "לחזרה לתפריט הראשי הקש אפס. לחזרה לתפריט הקודם הקש כוכבית. לסולמית לחזרה לתפריט הראשי."
     )
 
 
@@ -2154,6 +2185,8 @@ def main_menu_area(st, p, call_id, phone, recorded):
         st["awaiting"] = False
         val = (p.get(st.get("field", "")) or "").strip()
         stage = st.get("menu_stage", "root")
+        if val in ("*", "#"):
+            return return_to_main_menu(st)
         if stage == "root":
             if val == "1":
                 st["menu_stage"] = "assistants"
@@ -2192,11 +2225,23 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 labels = {m: l for m, l in MAIN_ASSISTANT_OPTIONS.values()}
                 labels["central"] = "העוזר המרכזי"
                 if last_mode == "tools":
+                    # Resume the previous tools conversation directly instead of
+                    # sending the caller back to the tools selection menu.
                     st["menu_stage"] = "tools"
-                    st["tools_chat"] = False
+                    st["tools_chat"] = True
                     st["tools_busy"] = False
                     st.pop("tools_action", None)
-                    return _digits(st, tools_menu_text())
+                    st["main_menu"] = True
+                    st["status"] = "idle"
+                    st["last"] = None
+                    st["turn"] += 1
+                    return Response(
+                        read_command(
+                            "ממשיכים מהשיחה האחרונה שלך בכלי הבינה. אמור את הבקשה הבאה שלך. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
+                            call_id, st["turn"],
+                        ),
+                        mimetype="text/plain",
+                    )
                 if last_mode not in labels:
                     return _digits(st, main_menu_text("אין שיחה קודמת להמשיך"))
                 st["selected_assistant_mode"] = last_mode
@@ -2261,7 +2306,8 @@ def utilities_menu_text(message=""):
         prefix + "תפריט כלים שימושיים. "
         "לבדיקת מזג אוויר הקש אחת. לחישוב הקש שתיים. "
         "להמרת יחידות ומטבעות הקש שלוש. לתרגום הקש ארבע. "
-        "לחיפוש מהיר הקש חמש. לחזרה לתפריט הראשי הקש אפס."
+        "לחיפוש מהיר הקש חמש. לחזרה לתפריט הראשי הקש אפס. "
+        "לחזרה לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית."
     )
 
 
@@ -2278,6 +2324,8 @@ def utilities_area(st, p, call_id):
     if st.get("awaiting"):
         st["awaiting"] = False
         val = (p.get(st.get("field", "")) or "").strip()
+        if val in ("*", "#"):
+            return return_to_main_menu(st)
         if val in ("0", "9", ""):
             st["menu_stage"] = "root"
             return _digits(st, main_menu_text())
@@ -2300,7 +2348,7 @@ def forum_menu_text(message=""):
     return (
         prefix + "הפורום הקולי בעיוות קול. "
         "להאזנה להודעות האחרונות הקש אחת. לפרסום הודעה קולית חדשה הקש שתיים. "
-        "לחזרה לתפריט הראשי הקש אפס."
+        "לחזרה לתפריט הראשי הקש אפס. לחזרה לתפריט הקודם הקש כוכבית. לסולמית לחזרה לתפריט הראשי."
     )
 
 
@@ -2458,6 +2506,8 @@ def forum_area(st, p, call_id, phone, recorded):
         val = (p.get(st.get("field", "")) or "").strip()
         stage = st.get("forum_stage", "menu")
         if stage == "menu":
+            if val in ("*", "#"):
+                return return_to_main_menu(st)
             if val in ("0", "9", ""):
                 st["menu_stage"] = "root"
                 return _digits(st, main_menu_text())
@@ -2480,6 +2530,11 @@ def forum_area(st, p, call_id, phone, recorded):
                 return Response(read_command("אמור את ההודעה לפורום ובסיום הקש סולמית.", call_id, st["turn"]), mimetype="text/plain")
             return _digits(st, forum_menu_text("לא זיהיתי את הבחירה"))
         if stage == "pick":
+            if val == "#":
+                return return_to_main_menu(st)
+            if val == "*":
+                st["forum_stage"] = "menu"
+                return _digits(st, forum_menu_text())
             if val in ("0", "9", ""):
                 st["forum_stage"] = "menu"
                 return _digits(st, forum_menu_text())
@@ -2501,7 +2556,7 @@ def personal_menu_text(phone, message=""):
     text = (prefix + "האזור האישי" + (" של " + name if name else "") + ". "
             "לשמיעת פרטי הפרופיל שלך הקש 1. להחלפת הקול שלך הקש 2. לעדכון השם שלך הקש 3. "
             "להפעלה או כיבוי של שמירת היסטוריית השיחות הקש 4. לשמיעת השיחה האחרונה שלך הקש 5. ")
-    return text + ("לחזרה לתפריט הראשי הקש 0." if calls.get(getattr(_tls, "call_id", ""), {}).get("main_menu") else "לשמיעה חוזרת הקש 0.")
+    return text + ("לחזרה לתפריט הראשי הקש 0. " if calls.get(getattr(_tls, "call_id", ""), {}).get("main_menu") else "לשמיעה חוזרת הקש 0. ") + "לחזרה לתפריט הקודם הקש כוכבית. לחזרה לתפריט הראשי הקש סולמית."
 
 
 def profile_text(phone):
@@ -2599,6 +2654,16 @@ def _pa_show(st, mode, phone):
 
 
 def _pa_handle(st, mode, val, call_id, phone):
+    if val == "#":
+        return return_to_main_menu(st)
+    if val == "*":
+        if mode in ("tpick", "block", "unblock") and st.get("is_admin"):
+            st["pa_mode"] = "admin"
+            return _digits(st, admin_menu_text())
+        if mode == "menu" and not st.get("main_menu"):
+            st["pa_mode"] = "menu"
+            return _digits(st, personal_menu_text(phone))
+        return return_to_main_menu(st)
     if mode == "menu":
         if val == "0" and st.get("main_menu"):
             st["menu_stage"] = "root"
@@ -2745,8 +2810,10 @@ def ivr():
     if p.get("hangup") == "yes":
         with lock:
             calls.pop(call_id, None)
-        histories.pop(call_id, None)
-        _history_loaded.discard(call_id)
+        for history_key in [key for key in histories if key[0] == call_id]:
+            histories.pop(history_key, None)
+        for history_key in [key for key in _history_loaded if key[0] == call_id]:
+            _history_loaded.discard(history_key)
         return Response("", mimetype="text/plain")
 
     if TEST_MODE:
@@ -2774,14 +2841,8 @@ def ivr():
             {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
              "voice": voice_index_for(phone, assistant_mode), "audio": None, "ext_path": ext_path},
         )
-        if is_new_call and call_id not in _history_loaded:
-            history = histories.setdefault(call_id, [])
-            for old_heard, old_answer in previous_turns:
-                if old_heard:
-                    history.append(types.Content(role="user", parts=[types.Part(text=old_heard)]))
-                    history.append(types.Content(role="model", parts=[types.Part(text=old_answer)]))
-            history[:] = history[-12:]
-            _history_loaded.add(call_id)
+        # The greeting uses the latest saved turn; ask_gemini loads the full
+        # assistant-specific context lazily after the caller chooses an assistant.
         previous_answer = previous_turns[-1][1].strip() if previous_turns else ""
         topic_for_greeting = clean_for_tts(previous_topic)[:110]
         answer_for_greeting = clean_for_tts(previous_answer)[:110]
