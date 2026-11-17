@@ -2673,6 +2673,10 @@ def ivr():
     phone = p.get("ApiPhone", "")
     requested_lang = (p.get("lang") or "").strip().lower()
     requested_mode = (p.get("mode") or "").strip().lower()
+    # ימות מוחקת לפעמים את ה-& מכתובת השלוחה, ואז מגיע lang=hemode=smart. מפרקים בחזרה.
+    if "mode=" in requested_lang:
+        requested_lang, _, glued_mode = requested_lang.partition("mode=")
+        requested_mode = requested_mode or glued_mode.split("&")[0].strip()
     allowed_modes = {"smart", "edgy", "psychologist", "yeshiva", "yiddish", "tools", "astrology", "central", "personal", "menu"}
     use_yiddish = requested_lang in ("yi", "yiddish", "1") if requested_lang else YIDDISH_MODE
     _tls.yiddish = use_yiddish
