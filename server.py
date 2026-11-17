@@ -1874,14 +1874,22 @@ def create_podcast_audio(call_id, payload):
     if full_chars > 9000:
         return "ההסכת ארוך מדי ליצירה אחת. בקש פרק קצר יותר."
     wav = podcast_tts_wav(clean)
-    name = "pod" + re.sub(r"[^0-9a-zA-Z]", "", call_id)[:10]
-    path = upload_to_yemot(wav, name)
+    title = str(payload.get("title") or "הסכת חדש")[:100]
+    path = forum_upload_audio(wav, call_id)
+    dialogue_text = "\n".join(
+        ("מגיש ראשון: " if item["speaker"] == "Host1" else "מגיש שני: ") + item["text"]
+        for item in clean
+    )
+    save_generated_forum_post(
+        call_id, getattr(_tls, "phone", ""), title, dialogue_text,
+        content_type="podcast", audio_path=path,
+    )
     with lock:
         st = calls.get(call_id)
         if st is not None:
             st["generated_audio"] = path
-            st["podcast_title"] = str(payload.get("title") or "הסכת")[:100]
-    return "ההסכת נוצר. הקובץ מוכן להאזנה."
+            st["podcast_title"] = title
+    return "ההסכת נוצר ופורסם בפורום שבאתר ובקו. הקובץ מוכן להאזנה."
 
 
 def generate_image_bytes(prompt):
@@ -1905,23 +1913,37 @@ def generate_image_bytes(prompt):
 
 
 def prepare_image_email(call_id, phone, action):
-    to = (action.get("to") or caller(phone).get("email_address") or "").strip()
-    if not to:
-        return "כדי לשלוח את התמונה, אמור תחילה את כתובת המייל של הנמען."
-    if not mail_enabled_for(phone) or not EMAIL_ENABLED:
-        return "אין כרגע חיבור מייל פעיל בחשבון הזה. התמונה לא נשלחה."
-    candidates = resolve_recipient(to)
-    if not candidates:
-        return "לא מצאתי כתובת מייל מתאימה. אמור את כתובת המייל המלאה."
-    if len(candidates) > 1:
-        options = ", ".join((c.get("name") or "") + " " + speak_email(c["email"]) for c in candidates[:3])
-        return "מצאתי כמה כתובות אפשריות: " + options + ". אמור כתובת מלאה."
     prompt = (action.get("prompt") or "").strip()
     if not prompt:
         return "תאר איזו תמונה ליצור."
-    raw, mime_type = generate_image_bytes(prompt)
+    try:
+        raw, mime_type = generate_image_bytes(prompt)
+    except Exception as e:
+        print("image generation failed:", redact(e)[:180], flush=True)
+        return "לא הצלחתי ליצור את התמונה כרגע. נסה שוב עם תיאור מעט קצר יותר."
     if len(raw) > 8 * 1024 * 1024:
-        return "התמונה שנוצרה גדולה מדי לשליחה במייל."
+        return "התמונה שנוצרה גדולה מדי לשמירה ולפרסום."
+    published = None
+    if action.get("publish_to_forum", True) is not False:
+        public_title = str(action.get("public_title") or "תמונה חדשה")[:120]
+        public_description = str(
+            action.get("public_description") or "תמונה שנוצרה באמצעות בינה מלאכותית."
+        )[:3000]
+        published = save_generated_forum_post(
+            call_id, phone, public_title, public_description,
+            content_type="image", image_data=raw, image_mime=mime_type,
+        )
+    to = (action.get("to") or caller(phone).get("email_address") or "").strip()
+    if not to:
+        return "התמונה נוצרה" + (" ופורסמה בפורום באתר ובקו." if published else ".") + " כדי לשלוח אותה למייל, אמור את כתובת הנמען."
+    if not mail_enabled_for(phone) or not EMAIL_ENABLED:
+        return "התמונה נוצרה" + (" ופורסמה בפורום באתר ובקו." if published else ".") + " אבל חיבור המייל אינו פעיל כרגע, ולכן לא נשלחה."
+    candidates = resolve_recipient(to)
+    if not candidates:
+        return "התמונה נוצרה" + (" ופורסמה בפורום." if published else ".") + " לא מצאתי כתובת מייל מתאימה. אמור את כתובת המייל המלאה."
+    if len(candidates) > 1:
+        options = ", ".join((c.get("name") or "") + " " + speak_email(c["email"]) for c in candidates[:3])
+        return "מצאתי כמה כתובות אפשריות: " + options + ". אמור כתובת מלאה."
     filename = "ai-image-" + re.sub(r"[^0-9A-Za-z]", "", str(call_id))[:10] + ".png"
     attachment = {
         "filename": filename,
@@ -1939,26 +1961,7 @@ def prepare_image_email(call_id, phone, action):
                 "attachment": attachment,
             }
     target = (c.get("name") + " בכתובת ") if c.get("name") else "לכתובת "
-    return "יצרתי את התמונה. אני עומד לשלוח אותה " + target + speak_email(c["email"]) + ". האם לשלוח? אמור כן או לא."
-
-
-CREATION_ACTIONS = {
-    "podcast", "image", "writing", "planning", "research",
-    "utility_translation", "utility_research",
-}
-
-
-def default_tool_clarification(action):
-    questions = {
-        "podcast": "כדי להכין הסכת מתאים, למי הוא מיועד, כמה זמן הוא צריך להימשך, איזה סגנון תרצה ואילו נושאים חשוב לכלול?",
-        "image": "כדי לדייק את התמונה, מה הנושא, איזה סגנון וצבעים תרצה, לאיזה שימוש היא מיועדת ולאיזו כתובת לשלוח אותה?",
-        "writing": "כדי לכתוב בדיוק מה שצריך, מי קהל היעד, מה מטרת הטקסט, מה האורך הרצוי ואיזה סגנון וטון תעדיף?",
-        "planning": "כדי לבנות תוכנית מתאימה, מה היעד, מה מסגרת הזמן, אילו מגבלות יש ומה סדר העדיפויות?",
-        "research": "כדי למקד את המחקר, על איזה היבט להתמקד, לאיזו תקופה, מה עומק הפירוט ומה תרצה לקבל בסיום?",
-        "utility_translation": "כדי לדייק את התרגום, מה שפת המקור, מה שפת היעד והאם לשמור על ניסוח מילולי או טבעי?",
-        "utility_research": "כדי למקד את החיפוש, איזה מידע בדיוק דרוש, לאיזה אזור או תקופה, וכמה פירוט אתה צריך?",
-    }
-    return questions.get(action, "כדי להכין תוצאה מדויקת, מה המטרה, למי היא מיועדת, מה היקף התוצר ואילו פרטים חשוב לכלול?")
+    return "יצרתי את התמונה" + (" ופרסמתי אותה בפורום." if published else ".") + " אני עומד לשלוח אותה " + target + speak_email(c["email"]) + ". האם לשלוח? אמור כן או לא."
 
 
 def ask_gemini(call_id, audio_bytes, phone=""):
