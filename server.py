@@ -4045,6 +4045,33 @@ def admin_reset_quota():
     return jsonify({"ok": True})
 
 
+def db_inventory_log(conn):
+    """Read-only: logs a non-secret fingerprint of the database and row counts, to compare services."""
+    try:
+        import urllib.parse as _up
+        u = _up.urlparse(DATABASE_URL)
+        ident = hashlib.sha256(f"{u.hostname}/{u.path}".encode()).hexdigest()[:10]
+        parts = [f"db={ident}", f"host={(u.hostname or '')[:12]}..."]
+        with conn.cursor() as cur:
+            for t in ("caller_profiles", "call_transcripts", "gemini_key_pool", "admin_audio_files",
+                      "voice_forum_posts", "admin_notifications"):
+                try:
+                    cur.execute("SELECT count(*) FROM " + t)
+                    parts.append(f"{t}={cur.fetchone()[0]}")
+                except Exception:
+                    conn.rollback()
+                    parts.append(f"{t}=missing")
+            try:
+                cur.execute("SELECT count(DISTINCT call_id), count(DISTINCT phone) FROM call_transcripts")
+                c, ph = cur.fetchone()
+                parts.append(f"calls={c} phones={ph}")
+            except Exception:
+                conn.rollback()
+        print("DB inventory: " + " ".join(parts), flush=True)
+    except Exception as e:
+        print("DB inventory failed:", type(e).__name__, flush=True)
+
+
 # Run additive schema setup during startup rather than waiting for the first
 # caller request. This creates missing tables/columns (including the voice
 # forum table) while preserving all existing rows.
@@ -4052,6 +4079,7 @@ _startup_db_conn = db_connect()
 if _startup_db_conn is not None:
     try:
         validate_gemini_key_pool(_startup_db_conn)
+        db_inventory_log(_startup_db_conn)
     finally:
         _startup_db_conn.close()
 
