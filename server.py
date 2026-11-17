@@ -1739,16 +1739,19 @@ def prepare_image_email(call_id, phone, action):
 
 
 def ask_gemini(call_id, audio_bytes, phone=""):
-    history = histories.setdefault(call_id, [])
     assistant_mode = getattr(_tls, "assistant_mode", "smart")
+    history_key = (call_id, assistant_mode)
+    history = histories.setdefault(history_key, [])
     history_enabled = caller(phone).get("history_enabled", True) is not False
-    if phone and history_enabled and call_id not in _history_loaded:
+    # Load context separately for each assistant. A menu call may start in "menu"
+    # and select a different assistant later in the same phone call.
+    if phone and history_enabled and history_key not in _history_loaded:
         for heard_old, answer_old in db_load_history(phone, assistant_mode):
             if heard_old:
                 history.append(types.Content(role="user", parts=[types.Part(text=heard_old)]))
                 history.append(types.Content(role="model", parts=[types.Part(text=answer_old)]))
         history[:] = history[-12:]
-        _history_loaded.add(call_id)
+        _history_loaded.add(history_key)
     parts = [types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")]
     with lock:
         st0 = calls.get(call_id)
@@ -1955,8 +1958,11 @@ def cleanup_old():
     now = time.time()
     for cid in [c for c, s in calls.items() if now - s["t"] > 3600]:
         calls.pop(cid, None)
-        histories.pop(cid, None)
-        _history_loaded.discard(cid)
+        # Conversation histories are isolated by call and assistant.
+        for history_key in [key for key in histories if key[0] == cid]:
+            histories.pop(history_key, None)
+        for history_key in [key for key in _history_loaded if key[0] == cid]:
+            _history_loaded.discard(history_key)
 
 
 ADMIN_PHONES = [re.sub(r"\D", "", x) for x in os.environ.get("ADMIN_PHONES", "").split(",") if re.sub(r"\D", "", x)]
@@ -2192,11 +2198,23 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 labels = {m: l for m, l in MAIN_ASSISTANT_OPTIONS.values()}
                 labels["central"] = "העוזר המרכזי"
                 if last_mode == "tools":
+                    # Resume the previous tools conversation directly instead of
+                    # sending the caller back to the tools selection menu.
                     st["menu_stage"] = "tools"
-                    st["tools_chat"] = False
+                    st["tools_chat"] = True
                     st["tools_busy"] = False
                     st.pop("tools_action", None)
-                    return _digits(st, tools_menu_text())
+                    st["main_menu"] = True
+                    st["status"] = "idle"
+                    st["last"] = None
+                    st["turn"] += 1
+                    return Response(
+                        read_command(
+                            "ממשיכים מהשיחה האחרונה שלך בכלי הבינה. אמור את הבקשה הבאה שלך. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
+                            call_id, st["turn"],
+                        ),
+                        mimetype="text/plain",
+                    )
                 if last_mode not in labels:
                     return _digits(st, main_menu_text("אין שיחה קודמת להמשיך"))
                 st["selected_assistant_mode"] = last_mode
@@ -2745,8 +2763,10 @@ def ivr():
     if p.get("hangup") == "yes":
         with lock:
             calls.pop(call_id, None)
-        histories.pop(call_id, None)
-        _history_loaded.discard(call_id)
+        for history_key in [key for key in histories if key[0] == call_id]:
+            histories.pop(history_key, None)
+        for history_key in [key for key in _history_loaded if key[0] == call_id]:
+            _history_loaded.discard(history_key)
         return Response("", mimetype="text/plain")
 
     if TEST_MODE:
@@ -2774,14 +2794,8 @@ def ivr():
             {"turn": 0, "last": None, "status": "idle", "answer": "", "t": time.time(), "started": 0,
              "voice": voice_index_for(phone, assistant_mode), "audio": None, "ext_path": ext_path},
         )
-        if is_new_call and call_id not in _history_loaded:
-            history = histories.setdefault(call_id, [])
-            for old_heard, old_answer in previous_turns:
-                if old_heard:
-                    history.append(types.Content(role="user", parts=[types.Part(text=old_heard)]))
-                    history.append(types.Content(role="model", parts=[types.Part(text=old_answer)]))
-            history[:] = history[-12:]
-            _history_loaded.add(call_id)
+        # The greeting uses the latest saved turn; ask_gemini loads the full
+        # assistant-specific context lazily after the caller chooses an assistant.
         previous_answer = previous_turns[-1][1].strip() if previous_turns else ""
         topic_for_greeting = clean_for_tts(previous_topic)[:110]
         answer_for_greeting = clean_for_tts(previous_answer)[:110]
