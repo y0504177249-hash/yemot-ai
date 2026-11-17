@@ -2825,16 +2825,16 @@ def forum_recent_posts(limit=8):
     limit = max(1, min(int(limit), 12))
     conn = db_connect()
     if conn is None:
-        combined = [x for x in list(_forum_memory) + list(_forum_content_memory) if x.get("audio_path")]
+        combined = list(_forum_memory) + list(_forum_content_memory)
         return sorted(combined, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, display_name, audio_path, created_at, 'voice' AS post_kind, '' AS title
+                """SELECT id, display_name, audio_path, created_at, 'voice' AS post_kind, '' AS title, '' AS content_text
                    FROM voice_forum_posts
                    UNION ALL
-                   SELECT id, display_name, audio_path, created_at, 'generated' AS post_kind, title
-                   FROM forum_content_posts WHERE audio_path <> ''
+                   SELECT id, display_name, audio_path, created_at, 'generated' AS post_kind, title, content_text
+                   FROM forum_content_posts
                    ORDER BY created_at DESC, id DESC LIMIT %s""",
                 (limit,),
             )
@@ -2843,15 +2843,16 @@ def forum_recent_posts(limit=8):
         return [
             {"id": row[0], "name": ((row[5] + " מאת ") if row[5] else "") + (row[1] or "משתמש"),
              "audio_path": row[2], "created_at": row[3].strftime("%d/%m %H:%M"),
-             "kind": row[4]}
+             "kind": row[4], "title": row[5] or "", "content_text": row[6] or ""}
             for row in rows
         ]
     except Exception as e:
         print("forum list failed:", redact(e)[:160], flush=True)
-        combined = [x for x in list(_forum_memory) + list(_forum_content_memory) if x.get("audio_path")]
+        combined = list(_forum_memory) + list(_forum_content_memory)
         return sorted(combined, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
     finally:
         conn.close()
+
 
 def forum_worker(call_id, recorded, phone):
     state = calls.get(call_id)
@@ -2940,10 +2941,14 @@ def forum_area(st, p, call_id, phone, recorded):
             if val.isdigit() and 1 <= int(val) <= len(posts):
                 post = posts[int(val) - 1]
                 st["forum_stage"] = "menu"
-                return Response(
-                    f"id_list_message=f-{post['audio_path']}&go_to_folder={active_extension_path()}",
-                    mimetype="text/plain",
-                )
+                if post.get("audio_path"):
+                    return Response(
+                        f"id_list_message=f-{post['audio_path']}&go_to_folder={active_extension_path()}",
+                        mimetype="text/plain",
+                    )
+                spoken = clean_for_tts((post.get("title") or "תוכן בפורום") + ". " + (post.get("content_text") or ""))
+                st["turn"] += 1
+                return Response(read_command(spoken or "התוכן הזה אינו כולל הקלטה.", call_id, st["turn"]), mimetype="text/plain")
             return _digits(st, "הבחירה אינה תקינה. " + forum_menu_text())
     return _digits(st, forum_menu_text())
 
