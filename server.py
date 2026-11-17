@@ -52,7 +52,7 @@ def yiddish_mode():
 RECORD_PATH = os.environ.get("RECORD_PATH", "/8")
 # במהלך המתנה חוזרים לכניסה הראשית של הקו, ולא לשלוחה 8.
 EXTENSION_PATH = os.environ.get("EXTENSION_PATH", "/").strip() or "/"
-if EXTENSION_PATH.rstrip("/") == "/8":
+if EXTENSION_PATH.strip("/") == "8":
     EXTENSION_PATH = "/"
 # קובץ מנגינת המתנה בימות המשיח, למשל /8/music (בלי סיומת). אם ריק, מושמעת הודעת "נא להמתין"
 MUSIC_FILE = os.environ.get("MUSIC_FILE", "").strip()
@@ -1538,7 +1538,8 @@ def upload_hold_music():
         return
     filename = MUSIC_FILE.rsplit("/", 1)[-1]
     filename = filename if filename.lower().endswith(".wav") else filename + ".wav"
-    folder = EXTENSION_PATH.rstrip("/") or "/"
+    # Keep hold music beside the recordings, independently of the return-to-menu path.
+    folder = RECORD_PATH.rstrip("/") or "/"
     path = (folder + "/" + filename) if folder != "/" else "/" + filename
     wav_bytes = make_hold_music()
     response = requests.post(
