@@ -2110,6 +2110,7 @@ def main_menu_text(message=""):
         "לכלים שימושיים הקש שלוש. "
         "לאזור האישי הקש ארבע. "
         "לניהול המערכת הקש חמש. "
+        "לפורום הקולי בעיוות קול הקש שש. "
         "לעוזר המרכזי עם גישה לכל הכלים הקש אפס. "
         "לשמיעת התפריט מחדש הקש תשע."
     )
@@ -2160,6 +2161,10 @@ def main_menu_area(st, p, call_id, phone, recorded):
                     return _digits(st, main_menu_text("הגישה לניהול נעולה זמנית לאחר ניסיונות כושלים"))
                 st["pa_mode"] = "code"
                 return phone_area(st, p, call_id, phone, recorded)
+            if val == "6":
+                st["menu_stage"] = "forum"
+                st["forum_stage"] = "menu"
+                return _digits(st, forum_menu_text())
             if val == "0":
                 st["selected_assistant_mode"] = "central"
                 st["menu_stage"] = "assistant_chat"
