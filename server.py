@@ -291,7 +291,8 @@ def system_prompt():
     tool_action = getattr(_tls, "tool_action", "") or ""
     tools_allowed = profile.get("tools_enabled", True) is not False
     mail_ok = selected_mode in ("smart", "tools", "central") and tools_allowed and mail_enabled_for(getattr(_tls, "phone", ""))
-    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed, tool_action)
+    clarification_done = bool(getattr(_tls, "tool_clarifications_done", False))
+    key = (json.dumps(contacts, sort_keys=True, ensure_ascii=False), extra, voice_on(), mail_ok, bool(mail_target()[0]), yiddish_mode(), selected_mode, tools_allowed, tool_action, clarification_done)
     if key not in _prompt_cache:
         text = (YIDDISH_BASE_PROMPT if yiddish_mode() else BASE_PROMPT)
         if tools_allowed:
@@ -318,12 +319,14 @@ def system_prompt():
                 "utility_map": "המשתמש בחר כלי מפות חד-פעמי, לא צ'אט. לאחר בקשה במשפט אחד, חלץ origin, destination, travel_mode (TRANSIT או WALK), time_kind (departure או arrival) ו-time_value בפורמט ISO 8601 עם אזור הזמן Asia/Jerusalem. אם פרט כלשהו חסר או לא ברור, החזר clarification_question במשפט אחד שמבקש את כל הפרטים החסרים יחד. כשכל הפרטים ברורים, החזר map_request עם השדות האלו והשאר answer ריק. לעולם אל תמציא מסלול, תחנה, קו או הוראה; השרת יחזיר הוראות רק משירות המפות."
             }
             text += " " + action_prompts.get(tool_action, "")
-        if selected_mode == "tools" and tool_action in ("podcast", "image", "writing", "planning", "research"):
-            text += " לפני יצירת התוצר, אחרי שהמשתמש תיאר מה הוא רוצה, שאל שאלה אחת במשפט אחד שמרכזת כמה שאלות מיקוד רלוונטיות: קהל יעד, מטרה, אורך, סגנון, פרטים שחובה לכלול או מגבלות. החזר את השאלה בשדה clarification_question והשאר שדות יצירה ריקים. אחרי שהמשתמש עונה, אפשר ליצור בלי לחזור על שאלות שכבר נענו. עבור תוצר מוגמר שנועד לפרסום כללי בפורום, החזר גם forum_content={\"title\":\"כותרת\",\"content\":\"התוכן המלא לפרסום\",\"content_type\":\"text|guide|plan|research\"}. אל תכלול בפורום כתובות מייל, מספרי טלפון, פרטים אישיים, תוכן הודעות דואר או סיכומי קבצים פרטיים; אם התוצר פרטי או רגיש, השאר forum_content ריק."
-        if selected_mode == "tools" and tool_action == "podcast":
-            text += " לפני יצירת ההסכת, בקש במשפט אחד את קהל היעד, משך, סגנון ונושאים חשובים. לאחר המענה צור את ההסכת."
+        if selected_mode == "tools" and tool_action in CREATION_ACTIONS:
+            if clarification_done:
+                text += " המשתמש כבר ענה על שאלת המיקוד. השתמש בכל התשובות שכבר ניתנו והתחל ליצור; אל תשאל שוב על פרטים שכבר נענו. שאל רק אם פרט חיוני לביצוע חסר באמת."
+            else:
+                text += " לפני יצירת התוצר, אחרי שהמשתמש תיאר מה הוא רוצה, שאל שאלה אחת בלבד במשפט אחד שמרכז כמה שאלות מיקוד רלוונטיות: קהל יעד, מטרה, אורך, סגנון, פרטים שחובה לכלול ומגבלות. החזר את השאלה בשדה clarification_question והשאר שדות יצירה ריקים."
+            text += " אם התוצר מתאים לפרסום כללי ואינו אישי או פרטי, החזר גם forum_content עם title, content ותוכן מסוג אחד מתוך text, guide, plan או research. אל תכלול בפורום כתובות מייל, מספרי טלפון, פרטים אישיים, תוכן הודעות דואר או סיכומי קבצים פרטיים; אם התוצר פרטי או רגיש, השאר forum_content ריק."
         if selected_mode == "tools" and tool_action == "image":
-            text += " לפני יצירת התמונה, בקש במשפט אחד פרטים חסרים על הנושא, הסגנון, הצבעים והשימוש; ודא שהכתובת למשלוח ידועה. לצד create_image הוסף public_title ו-public_description קצרים שאינם חושפים פרטים אישיים, לשם פרסום התמונה בפורום."
+            text += " השתמש בתשובות המיקוד כדי להכין create_image והוסף public_title ו-public_description שאינם חושפים פרטים אישיים. אם כתובת המייל עדיין חסרה, שאל רק מהי כתובת הנמען."
         if selected_mode == "tools" and tool_action == "writing":
             text += " התוצר הכתוב שביקש המשתמש הוא התוכן לפרסום בפורום, בתנאי שאינו אישי או פרטי. החזר forum_content מלא עם כותרת ותוכן."
         if selected_mode == "tools" and tool_action == "utility_map":
@@ -2203,6 +2206,7 @@ def worker(call_id, recorded, phone="", use_yiddish=None, assistant_mode=None, t
     _tls.tool_action = tool_action or ""
     _tls.phone = phone
     state = calls.get(call_id) or {}
+    _tls.tool_clarifications_done = bool(state.get("tool_clarifications_done"))
     fallback = "/1/1" if _tls.yiddish else "/8"
     _tls.record_path = state.get("record_path") or state.get("ext_path") or fallback
     _tls.extension_path = state.get("extension_path") or state.get("ext_path") or "/"
