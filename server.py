@@ -849,6 +849,32 @@ def db_load_history(phone, assistant_mode="smart"):
         conn.close()
 
 
+def db_load_recent_history(phone, limit=6):
+    """Load the latest conversation turns across assistants for a returning caller."""
+    if not phone or caller(phone).get("history_enabled", True) is False:
+        return []
+    conn = db_connect()
+    if conn is None:
+        return []
+    try:
+        with conn.cursor() as cur:
+            db_ensure_transcript_columns(conn)
+            cur.execute(
+                """SELECT heard, answer FROM call_transcripts
+                   WHERE phone = %s
+                   ORDER BY created_at DESC, id DESC LIMIT %s""",
+                (phone, max(1, min(int(limit), 12))),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+        return list(reversed(rows))
+    except Exception as e:
+        print("recent conversation history load failed:", redact(e), flush=True)
+        return []
+    finally:
+        conn.close()
+
+
 def db_save_transcript(call_id, phone, heard, answer, assistant_mode="smart"):
     if not DATABASE_URL or not phone or not heard or caller(phone).get("history_enabled", True) is False:
         return False
@@ -2275,7 +2301,7 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 st["turn"] += 1
                 return Response(
                     read_command(
-                        "ברוכים הבאים לעוזר הבינה המרכזי, עם גישה לכלי הבינה הזמינים עבורך. אפשר לשאול כל שאלה או לבקש לבצע משימה. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
+                        "ברוכים הבאים לעוזר הבינה המרכזי, עם גישה לכלי הבינה הזמינים עבורך. אפשר לשאול כל שאלה או לבקש לבצע משימה. " + (st.get("previous_topic") and "בשיחה הקודמת שאלת: " + clean_for_tts(st.get("previous_topic", ""))[:100] + ". " if st.get("previous_topic") else "") + "כדי לחזור לתפריט הראשי אמור חזרה לתפריט.",
                         call_id, st["turn"],
                     ),
                     mimetype="text/plain",
@@ -2298,7 +2324,8 @@ def main_menu_area(st, p, call_id, phone, recorded):
             st["tools_chat"] = False
             st.pop("tools_action", None)
             st["turn"] += 1
-            prompt = "בחרת " + label + ". אמור את בקשתך. כדי לחזור לתפריט הראשי אמור חזרה לתפריט."
+            context = ("בשיחה הקודמת שאלת: " + clean_for_tts(st.get("previous_topic", ""))[:100] + ". אפשר להמשיך מאותו עניין או לשאול משהו חדש. ") if st.get("previous_topic") else ""
+            prompt = "בחרת " + label + ". " + context + "אמור את בקשתך. כדי לחזור לתפריט הראשי אמור חזרה לתפריט."
             if mode == "yiddish":
                 prompt = "האסט אויסגעקליבן די יידישע בינה. זאג דיין בקשה אויף יידיש. צו צוריקגיין צום הויפט מעניו זאג צוריק צום מעניו."
             return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
@@ -2839,7 +2866,7 @@ def ivr():
 
     # Load caller history once at the start of each new call, outside the global lock.
     is_new_call = call_id not in calls
-    previous_turns = db_load_history(phone, assistant_mode) if is_new_call and phone and caller(phone).get("history_enabled", True) is not False else []
+    previous_turns = db_load_recent_history(phone) if is_new_call and phone and caller(phone).get("history_enabled", True) is not False else []
     previous_topic = previous_turns[-1][0].strip() if previous_turns else ""
 
     with lock:
@@ -2886,6 +2913,8 @@ def ivr():
             greeting = ("בעזרת השם, שלום " + who + ". ") if who else "בעזרת השם, שלום. "
             greeting += "שב בני, ספר לי, מה על לבך?"
         st.setdefault("opening_greeting", greeting)
+        st.setdefault("previous_topic", previous_topic)
+        st.setdefault("previous_answer", previous_turns[-1][1].strip() if previous_turns else "")
         st["t"] = time.time()
 
         main_menu_active = bool(st.get("main_menu") or assistant_mode == "menu")
