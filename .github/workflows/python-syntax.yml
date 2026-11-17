@@ -14,3 +14,18 @@ jobs:
           python-version: "3.14"
       - name: Compile Python files
         run: python -m py_compile server.py voicepack.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check public forum JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path("forum.html").read_text(encoding="utf-8")
+          scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+          if not scripts:
+              raise SystemExit("No forum script found")
+          Path("/tmp/forum.js").write_text("\n".join(scripts), encoding="utf-8")
+          PY
+          node --check /tmp/forum.js
