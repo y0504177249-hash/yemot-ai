@@ -2674,8 +2674,9 @@ def utilities_area(st, p, call_id):
 def forum_menu_text(message=""):
     prefix = (message + ". ") if message else ""
     return (
-        prefix + "הפורום הקולי בעיוות קול. "
-        "להאזנה להודעות האחרונות הקש אחת. לפרסום הודעה קולית חדשה הקש שתיים. "
+        prefix + "הפורום הקולי והתכנים שנוצרו במערכת. "
+        "להאזנה להודעות ולתכנים של משתמשים אחרים, כולל הסכתים, הקש אחת. "
+        "לפרסום הודעה קולית חדשה בעיוות קול הקש שתיים. "
         "לחזרה לתפריט הראשי הקש אפס. לחזרה לתפריט הקודם הקש כוכבית. לסולמית לחזרה לתפריט הראשי."
     )
 
@@ -2727,6 +2728,64 @@ def forum_upload_audio(raw_audio, call_id):
     return folder + "/" + filename
 
 
+def save_generated_forum_post(call_id, phone, title, content_text, content_type="text",
+                                audio_path="", image_data=None, image_mime=""):
+    """Publish a non-private generated artifact to the shared website and phone forum."""
+    title = " ".join(str(title or "תוכן חדש").split())[:120] or "תוכן חדש"
+    content_text = str(content_text or "").strip()[:20000]
+    content_type = str(content_type or "text")[:30]
+    if not content_text and not image_data:
+        return None
+    if not audio_path:
+        speech_text = (title + ". " + content_text)[:1800]
+        try:
+            wav = tts_wav(speech_text, cfg("default_voice"))
+            audio_path = forum_upload_audio(wav, call_id)
+        except Exception as e:
+            print("generated forum audio failed:", redact(e)[:180], flush=True)
+            audio_path = ""
+    display_name = (caller(phone).get("name") or "משתמש")[:50]
+    record = {
+        "id": int(time.time() * 1000),
+        "source_call_id": str(call_id or "")[:200],
+        "phone": str(phone or "")[:30],
+        "name": display_name,
+        "title": title,
+        "content_type": content_type,
+        "content_text": content_text,
+        "audio_path": audio_path,
+        "image_data": image_data,
+        "image_mime": image_mime or "",
+        "created_at": time.strftime("%d/%m %H:%M"),
+    }
+    conn = db_connect()
+    if conn is None:
+        _forum_content_memory.appendleft(record)
+        return record
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO forum_content_posts
+                       (source_call_id, phone, display_name, title, content_type,
+                        content_text, audio_path, image_data, image_mime)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       RETURNING id, created_at""",
+                    (record["source_call_id"], record["phone"], display_name, title,
+                     content_type, content_text, audio_path, image_data, record["image_mime"]),
+                )
+                row = cur.fetchone()
+        record["id"] = row[0]
+        record["created_at"] = row[1].strftime("%d/%m %H:%M")
+        return record
+    except Exception as e:
+        print("generated forum post save failed:", redact(e)[:180], flush=True)
+        _forum_content_memory.appendleft(record)
+        return record
+    finally:
+        conn.close()
+
+
 def forum_save_post(phone, audio_path):
     display_name = (caller(phone).get("name") or "משתמש")[:50]
     record = {
@@ -2760,28 +2819,36 @@ def forum_save_post(phone, audio_path):
 
 
 def forum_recent_posts(limit=8):
+    limit = max(1, min(int(limit), 12))
     conn = db_connect()
     if conn is None:
-        return list(_forum_memory)[:limit]
+        combined = [x for x in list(_forum_memory) + list(_forum_content_memory) if x.get("audio_path")]
+        return sorted(combined, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, display_name, audio_path, created_at FROM voice_forum_posts ORDER BY created_at DESC, id DESC LIMIT %s",
-                (max(1, min(int(limit), 8)),),
+                """SELECT id, display_name, audio_path, created_at, 'voice' AS post_kind, '' AS title
+                   FROM voice_forum_posts
+                   UNION ALL
+                   SELECT id, display_name, audio_path, created_at, 'generated' AS post_kind, title
+                   FROM forum_content_posts WHERE audio_path <> ''
+                   ORDER BY created_at DESC, id DESC LIMIT %s""",
+                (limit,),
             )
             rows = cur.fetchall()
         conn.commit()
         return [
-            {"id": row[0], "name": row[1] or "משתמש", "audio_path": row[2],
-             "created_at": row[3].strftime("%d/%m %H:%M")}
+            {"id": row[0], "name": ((row[5] + " מאת ") if row[5] else "") + (row[1] or "משתמש"),
+             "audio_path": row[2], "created_at": row[3].strftime("%d/%m %H:%M"),
+             "kind": row[4]}
             for row in rows
         ]
     except Exception as e:
         print("forum list failed:", redact(e)[:160], flush=True)
-        return list(_forum_memory)[:limit]
+        combined = [x for x in list(_forum_memory) + list(_forum_content_memory) if x.get("audio_path")]
+        return sorted(combined, key=lambda x: x.get("created_at", ""), reverse=True)[:limit]
     finally:
         conn.close()
-
 
 def forum_worker(call_id, recorded, phone):
     state = calls.get(call_id)
