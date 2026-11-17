@@ -1,24 +1,29 @@
 # Transitous and OpenStreetMap attribution
 
-The route-planning feature uses the public Transitous MOTIS API:
-https://transitous.org/api/
+The map feature uses Transitous' public MOTIS 2 API:
+- Route planning: https://api.transitous.org/api/v6/plan
+- One-shot place lookup: https://api.transitous.org/api/v1/geocode
 
-Transitous API usage is limited to this open-source, non-commercial application.
-Requests include the application name, version, and service URL in the User-Agent.
-The application caches geocoding and route results and enforces a rolling 24-hour
-limit of 600 route-planning requests, below Transitous' published 720-request
-coordination threshold. Automated polling and scraping are not used.
+This application is open-source and non-commercial. Requests are user-initiated;
+there is no automatic polling, scraping, or type-ahead autocomplete. Place
+lookups are cached for seven days. Route results are cached for five minutes.
+A persistent rolling 24-hour counter limits route-planning calls to 600,
+below Transitous' published 720-request coordination threshold. If persistent
+usage accounting is unavailable, route requests fail closed.
 
-Map and geocoding data are provided by OpenStreetMap contributors.
-OpenStreetMap data is available under the Open Database License (ODbL).
-Attribution: https://www.openstreetmap.org/copyright
+Every API request sends a descriptive User-Agent containing the application
+name, client version, and service URL. Attribution to Transitous and the
+OpenStreetMap contributors is displayed in the website and route responses.
 
-Transitous sources and attribution details:
+Transitous source and attribution information:
 https://transitous.org/sources/
 
-Transitous is a community service provided on a best-effort basis. Route
-availability, timetables, and real-time information may be incomplete or delayed.
-Always verify important travel information with the relevant transport operator.
+Transitous privacy information:
+https://transitous.org/privacy/
+Transitous may log IP address, request time, requested route/place queries,
+and User-Agent for up to two days. Do not enter confidential information in
+place fields. Route and timetable data are best-effort and may be incomplete
+or delayed; verify critical travel details with the relevant operator.
 
-Geocoding uses the public Nominatim service. Requests are user-initiated,
-cached for seven days, and rate-limited to at most one request per second.
+OpenStreetMap data is available under the Open Database License (ODbL).
+Attribution: https://www.openstreetmap.org/copyright
