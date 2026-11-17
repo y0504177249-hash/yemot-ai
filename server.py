@@ -2111,9 +2111,31 @@ def main_menu_text(message=""):
         "לאזור האישי הקש ארבע. "
         "לניהול המערכת הקש חמש. "
         "לפורום הקולי בעיוות קול הקש שש. "
+        "להמשך השיחה האחרונה שלך הקש שבע. "
         "לעוזר המרכזי עם גישה לכל הכלים הקש אפס. "
         "לשמיעת התפריט מחדש הקש תשע."
     )
+
+
+def db_last_assistant_mode(phone):
+    """סוג העוזר של ההודעה האחרונה שנשמרה למספר הזה, או ריק."""
+    if not phone or caller(phone).get("history_enabled", True) is False:
+        return ""
+    conn = db_connect()
+    if conn is None:
+        return ""
+    try:
+        with conn.cursor() as cur:
+            db_ensure_transcript_columns(conn)
+            cur.execute("SELECT assistant_mode FROM call_transcripts WHERE phone=%s ORDER BY created_at DESC, id DESC LIMIT 1", (phone,))
+            row = cur.fetchone()
+        conn.commit()
+        return (row[0] or "") if row else ""
+    except Exception as e:
+        print("last assistant lookup failed:", redact(e), flush=True)
+        return ""
+    finally:
+        conn.close()
 
 
 def assistants_menu_text(message=""):
@@ -2165,6 +2187,32 @@ def main_menu_area(st, p, call_id, phone, recorded):
                 st["menu_stage"] = "forum"
                 st["forum_stage"] = "menu"
                 return _digits(st, forum_menu_text())
+            if val == "7":
+                last_mode = db_last_assistant_mode(phone)
+                labels = {m: l for m, l in MAIN_ASSISTANT_OPTIONS.values()}
+                labels["central"] = "העוזר המרכזי"
+                if last_mode == "tools":
+                    st["menu_stage"] = "tools"
+                    st["tools_chat"] = False
+                    st["tools_busy"] = False
+                    st.pop("tools_action", None)
+                    return _digits(st, tools_menu_text())
+                if last_mode not in labels:
+                    return _digits(st, main_menu_text("אין שיחה קודמת להמשיך"))
+                st["selected_assistant_mode"] = last_mode
+                st["menu_stage"] = "assistant_chat"
+                st["main_menu"] = True
+                st["status"] = "idle"
+                st["last"] = None
+                st["tools_chat"] = False
+                st.pop("tools_action", None)
+                st["turn"] += 1
+                if last_mode == "yiddish":
+                    prompt = "מיר גייען ווייטער פון דיין לעצטן שמועס. זאג דיין בקשה אויף יידיש. צו צוריקגיין צום הויפט מעניו זאג צוריק צום מעניו."
+                else:
+                    prompt = ("ממשיכים מהשיחה האחרונה שלך עם " + labels[last_mode] +
+                              ". אמור את בקשתך. כדי לחזור לתפריט הראשי אמור חזרה לתפריט.")
+                return Response(read_command(prompt, call_id, st["turn"]), mimetype="text/plain")
             if val == "0":
                 st["selected_assistant_mode"] = "central"
                 st["menu_stage"] = "assistant_chat"
