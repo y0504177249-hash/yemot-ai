@@ -128,7 +128,8 @@ def _worker(tts, voice, only, on_complete=None):
                     _state["done"] += 1
                 continue
             ok = False
-            for attempt in range(4):
+            fatal_error = False
+            for attempt in range(3):
                 try:
                     wav = to_yemot_wav(tts(text, voice))
                     with open(path, "wb") as f:
@@ -136,14 +137,32 @@ def _worker(tts, voice, only, on_complete=None):
                     ok = True
                     break
                 except Exception as e:  # noqa: BLE001
-                    print("voicepack", key, "attempt", attempt + 1, "failed:", str(e)[:160], flush=True)
-                    time.sleep(8 * (attempt + 1))
+                    msg = str(e)
+                    print("voicepack", key, "attempt", attempt + 1, "failed:", msg[:160], flush=True)
+                    if any(token in msg.upper() for token in ("NO TTS MODEL AVAILABLE", "429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")):
+                        fatal_error = True
+                        break
+                    if attempt < 2:
+                        time.sleep(3 * (attempt + 1))
             with _lock:
                 if ok:
                     _state["done"] += 1
                 else:
                     _state["failed"].append(key)
-            time.sleep(3)  # מרווח בין בקשות, כדי לא לחצות את מכסת ה-TTS
+            if fatal_error:
+                # A quota or model-availability failure affects the remaining
+                # messages too; stop instead of retrying the same unavailable model 40 times.
+                remaining = []
+                for j, item in enumerate(MESSAGES[i + 1:], start=i + 1):
+                    if only and item[0] not in only:
+                        continue
+                    remaining_path = os.path.join(outdir, file_name(j, item[0]) + ".wav")
+                    if not os.path.exists(remaining_path):
+                        remaining.append(item[0])
+                with _lock:
+                    _state["failed"].extend(remaining)
+                break
+            time.sleep(5)  # מרווח שמרני בין בקשות TTS
     finally:
         with _lock:
             _state["running"] = False
@@ -205,8 +224,17 @@ button,a.b{display:inline-block;padding:.6rem 1.1rem;margin:.3rem .3rem .3rem 0;
 <div id="s">טוען...</div>
 <script>
 const H={"X-Requested-With":"admin","Content-Type":"application/json"};
-async function st(){try{const r=await fetch("/admin/api/voicepack/status");const j=await r.json();
-document.getElementById("s").textContent=j.error?j.error:(j.running?"יוצר... ":"")+j.created+" מתוך "+j.total+" קבצים"+(j.failed&&j.failed.length?" | נכשלו: "+j.failed.join(", "):"");}catch(e){document.getElementById("s").textContent="שגיאת תקשורת"}}
+let autoStartAttempted=false;
+async function st(){try{
+ const r=await fetch("/admin/api/voicepack/status");const j=await r.json();
+ document.getElementById("s").textContent=j.error?j.error:(j.running?"יוצר... ":"")+j.created+" מתוך "+j.total+" קבצים"+(j.persisted?" | החבילה שמורה במסד הנתונים":"")+(j.failed&&j.failed.length?" | נכשלו: "+j.failed.join(", "):"");
+ if(!autoStartAttempted&&!j.running&&j.created===0&&!j.persisted){
+  autoStartAttempted=true;
+  const sr=await fetch("/admin/api/voicepack/start",{method:"POST",headers:H,body:"{}"});
+  const sj=await sr.json();
+  if(sj.started)document.getElementById("s").textContent="היצירה התחילה אוטומטית ברקע...";
+ }
+}catch(e){document.getElementById("s").textContent="שגיאת תקשורת"}}
 document.getElementById("go").onclick=async()=>{const r=await fetch("/admin/api/voicepack/start",{method:"POST",headers:H,body:"{}"});const j=await r.json();document.getElementById("s").textContent=j.started?"היצירה התחילה ברקע...": "היצירה כבר פועלת. אפשר לעקוב אחר ההתקדמות כאן.";st()};
 st();setInterval(st,5000);
 </script></body></html>"""
