@@ -314,9 +314,20 @@ def system_prompt():
                 "utility_calculator": "המשתמש בחר מחשבון. חשב בזהירות, בדוק את התוצאה פעם נוספת והקרא אותה בקצרה.",
                 "utility_conversion": "המשתמש בחר המרת יחידות או מטבע. הבהר יחידות ומטבעות, ובשערי מטבע השתמש במידע עדכני.",
                 "utility_translation": "המשתמש בחר תרגום. תרגם נאמנה לשפה שהתבקשה ושמור על המשמעות והטון.",
-                "utility_research": "המשתמש בחר חיפוש מהיר. השתמש בחיפוש כאשר נדרש מידע עובדתי או עדכני, וענה בתמצית."
+                "utility_research": "המשתמש בחר חיפוש מהיר. השתמש בחיפוש כאשר נדרש מידע עובדתי או עדכני, וענה בתמצית.",
+                "utility_map": "המשתמש בחר כלי מפות חד-פעמי, לא צ'אט. לאחר בקשה במשפט אחד, חלץ origin, destination, travel_mode (TRANSIT או WALK), time_kind (departure או arrival) ו-time_value בפורמט ISO 8601 עם אזור הזמן Asia/Jerusalem. אם פרט כלשהו חסר או לא ברור, החזר clarification_question במשפט אחד שמבקש את כל הפרטים החסרים יחד. כשכל הפרטים ברורים, החזר map_request עם השדות האלו והשאר answer ריק. לעולם אל תמציא מסלול, תחנה, קו או הוראה; השרת יחזיר הוראות רק משירות המפות."
             }
             text += " " + action_prompts.get(tool_action, "")
+        if selected_mode == "tools" and tool_action in ("podcast", "image", "writing", "planning", "research"):
+            text += " לפני יצירת התוצר, אחרי שהמשתמש תיאר מה הוא רוצה, שאל שאלה אחת במשפט אחד שמרכזת כמה שאלות מיקוד רלוונטיות: קהל יעד, מטרה, אורך, סגנון, פרטים שחובה לכלול או מגבלות. החזר את השאלה בשדה clarification_question והשאר שדות יצירה ריקים. אחרי שהמשתמש עונה, אפשר ליצור בלי לחזור על שאלות שכבר נענו. עבור תוצר מוגמר שנועד לפרסום כללי בפורום, החזר גם forum_content={\\"title\\":\\"כותרת\\",\\"content\\":\\"התוכן המלא לפרסום\\",\\"content_type\\":\\"text|guide|plan|research\\"}. אל תכלול בפורום כתובות מייל, מספרי טלפון, פרטים אישיים, תוכן הודעות דואר או סיכומי קבצים פרטיים; אם התוצר פרטי או רגיש, השאר forum_content ריק."
+        if selected_mode == "tools" and tool_action == "podcast":
+            text += " לפני יצירת ההסכת, בקש במשפט אחד את קהל היעד, משך, סגנון ונושאים חשובים. לאחר המענה צור את ההסכת."
+        if selected_mode == "tools" and tool_action == "image":
+            text += " לפני יצירת התמונה, בקש במשפט אחד פרטים חסרים על הנושא, הסגנון, הצבעים והשימוש; ודא שהכתובת למשלוח ידועה. לצד create_image הוסף public_title ו-public_description קצרים שאינם חושפים פרטים אישיים, לשם פרסום התמונה בפורום."
+        if selected_mode == "tools" and tool_action == "writing":
+            text += " התוצר הכתוב שביקש המשתמש הוא התוכן לפרסום בפורום, בתנאי שאינו אישי או פרטי. החזר forum_content מלא עם כותרת ותוכן."
+        if selected_mode == "tools" and tool_action == "utility_map":
+            text += " החזר map_request={\\"origin\\":\\"כתובת מוצא\\",\\"destination\\":\\"כתובת יעד\\",\\"travel_mode\\":\\"TRANSIT או WALK\\",\\"time_kind\\":\\"departure או arrival\\",\\"time_value\\":\\"YYYY-MM-DDTHH:MM:SS+02:00 או היסט ישראל מתאים\\"}. חייבים את כל חמשת הפרטים; אין להשלים מקום, שעה או אמצעי נסיעה בניחוש. שאל במשפט אחד על כל הפרטים החסרים. זהו כלי מפות ולא שיחה חופשית."
         text += ' אם המשתמש אומר במפורש "חזרה לתפריט" או "תפריט ראשי", הוסף ל-JSON את השדה return_to_menu=true וענה בקצרה שחוזרים לתפריט.'
         if extra:
             text += " הנחיות נוספות מהמשתמש: " + extra
@@ -1667,6 +1678,140 @@ def do_lookup(lookup, heard):
     except Exception as e:
         print("lookup error:", redact(e), flush=True)
         return ""
+
+
+def _map_local_datetime(value):
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("missing map time")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Jerusalem"))
+    return parsed.astimezone(ZoneInfo("Asia/Jerusalem"))
+
+
+def compute_map_route(map_request):
+    """Return verified, provider-calculated route steps; never improvise directions."""
+    if not GOOGLE_MAPS_API_KEY:
+        return (
+            "כלי המפות עדיין לא מחובר לשירות מסלולים. "
+            "כדי לקבל הוראות אמיתיות שלב אחר שלב, מנהל המערכת צריך להגדיר בשרת "
+            "מפתח Google Maps Routes API."
+        )
+    origin = str(map_request.get("origin") or "").strip()[:300]
+    destination = str(map_request.get("destination") or "").strip()[:300]
+    mode = str(map_request.get("travel_mode") or "").strip().upper()
+    time_kind = str(map_request.get("time_kind") or "").strip().lower()
+    if not origin or not destination or mode not in ("TRANSIT", "WALK") or time_kind not in ("departure", "arrival"):
+        return "חסרים פרטי מסלול. אמור במשפט אחד מוצא, יעד, שעת יציאה או הגעה, והאם לנסוע בתחבורה ציבורית או ללכת ברגל."
+    try:
+        requested_time = _map_local_datetime(map_request.get("time_value"))
+    except Exception:
+        return "לא הצלחתי להבין את מועד הנסיעה. אמור תאריך ושעה ברורים ליציאה או להגעה."
+    body = {
+        "origin": {"address": origin},
+        "destination": {"address": destination},
+        "travelMode": mode,
+        "languageCode": "he-IL",
+        "regionCode": "IL",
+        "units": "METRIC",
+        "computeAlternativeRoutes": False,
+    }
+    # Google transit routing supports either arrivalTime or departureTime.
+    # Walking duration is returned as a route estimate; arrival-time requests are
+    # converted to an estimated departure after the route duration is known.
+    if mode == "TRANSIT":
+        body["arrivalTime" if time_kind == "arrival" else "departureTime"] = requested_time.isoformat(timespec="seconds")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": (
+            "routes.duration,routes.distanceMeters,routes.localizedValues,"
+            "routes.legs.steps.navigationInstruction.instructions,"
+            "routes.legs.steps.travelMode,routes.legs.steps.localizedValues,"
+            "routes.legs.steps.transitDetails"
+        ),
+    }
+    try:
+        response = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            json=body,
+            headers=headers,
+            timeout=25,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        routes = payload.get("routes") or []
+        if not routes:
+            return "לא נמצא מסלול מתאים בין המוצא ליעד בזמן שביקשת. בדוק את הכתובות או נסה שעה אחרת."
+        route = routes[0]
+        duration_raw = str(route.get("duration") or "")
+        duration_match = re.match(r"^(\d+(?:\.\d+)?)s$", duration_raw)
+        duration_seconds = int(float(duration_match.group(1))) if duration_match else 0
+        minutes = max(1, round(duration_seconds / 60)) if duration_seconds else 0
+        distance_m = int(route.get("distanceMeters") or 0)
+        distance_label = (f"{distance_m / 1000:.1f} קילומטרים" if distance_m >= 1000
+                          else (f"{distance_m} מטרים" if distance_m else "מרחק לא זמין"))
+        localized = route.get("localizedValues") or {}
+        duration_label = ((localized.get("duration") or {}).get("text") or
+                          (f"כ-{minutes} דקות" if minutes else "משך זמן לא זמין"))
+        steps = (route.get("legs") or [{}])[0].get("steps") or []
+        instructions = []
+        for step in steps:
+            transit = step.get("transitDetails") or {}
+            if transit:
+                line = transit.get("transitLine") or {}
+                stops = transit.get("stopDetails") or {}
+                departure_stop = (stops.get("departureStop") or {}).get("name") or "התחנה הקרובה"
+                arrival_stop = (stops.get("arrivalStop") or {}).get("name") or "תחנת היעד"
+                line_name = line.get("shortName") or line.get("name") or "תחבורה ציבורית"
+                vehicle = (line.get("vehicle") or {}).get("name") or ""
+                headsign = transit.get("headsign") or ""
+                detail = f"עלה על {vehicle + ' ' if vehicle else ''}{line_name} בתחנת {departure_stop}"
+                if headsign:
+                    detail += f", בכיוון {headsign}"
+                detail += f", ורד בתחנת {arrival_stop}"
+                instructions.append(detail)
+                continue
+            instruction = ((step.get("navigationInstruction") or {}).get("instructions") or "").strip()
+            if instruction:
+                instruction = re.sub(r"<[^>]*>", " ", instruction)
+                instruction = html_module.unescape(" ".join(instruction.split()))
+                localized_step = step.get("localizedValues") or {}
+                step_distance = (localized_step.get("distance") or {}).get("text")
+                if step_distance:
+                    instruction += f" ({step_distance})"
+                instructions.append(instruction)
+        if not instructions:
+            return "שירות המפות מצא מסלול אך לא החזיר הוראות מפורטות. נסה שוב מאוחר יותר."
+        if mode == "WALK" and time_kind == "arrival" and duration_seconds:
+            departure = requested_time - timedelta(seconds=duration_seconds)
+            time_line = f"כדי להגיע בסביבות {requested_time.strftime('%H:%M')}, צא להליכה בסביבות {departure.strftime('%H:%M')}."
+        elif time_kind == "departure":
+            time_line = f"שעת היציאה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
+        else:
+            time_line = f"שעת ההגעה שביקשת היא {requested_time.strftime('%d/%m/%Y בשעה %H:%M')}."
+        mode_label = "תחבורה ציבורית" if mode == "TRANSIT" else "הליכה ברגל"
+        steps = instructions[:14]
+        numbered = " ".join(f"שלב {i + 1}: {item}." for i, item in enumerate(steps))
+        return (
+            f"מצאתי מסלול מ{origin} אל {destination}, באמצעות {mode_label}. "
+            f"{time_line} משך משוער {duration_label}, מרחק {distance_label}. "
+            f"ההדרכה לפי הסדר: {numbered}"
+        )
+    except requests.HTTPError as e:
+        status = getattr(getattr(e, "response", None), "status_code", 0)
+        print("Google Maps route request failed:", status, flush=True)
+        if status in (400, 404):
+            return "לא הצלחתי לחשב את המסלול. בדוק את שמות המקומות, התאריך והשעה."
+        if status in (401, 403):
+            return "שירות המפות אינו מאושר לשימוש במפתח שהוגדר. מנהל המערכת צריך לבדוק את הרשאת Routes API."
+        return "שירות המפות אינו זמין כרגע. נסה שוב מאוחר יותר."
+    except Exception as e:
+        print("map route calculation failed:", redact(e)[:180], flush=True)
+        return "לא הצלחתי לחשב את המסלול כרגע. נסה שוב מאוחר יותר."
 
 
 def podcast_tts_wav(dialogue):
