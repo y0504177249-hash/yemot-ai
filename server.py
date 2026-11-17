@@ -479,8 +479,68 @@ def ping():
 
 @app.route("/")
 def home():
-    # Render's base URL should open the admin UI instead of returning a 404.
-    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html"), mimetype="text/html")
+    # Unified website entry point; admin remains available at /admin.
+    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), mimetype="text/html")
+
+
+SMART_SEARCH_UPSTREAM = os.environ.get("SMART_SEARCH_UPSTREAM", "https://yemot-smart-search.onrender.com").rstrip("/")
+
+
+@app.route("/smart", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@app.route("/smart/", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@app.route("/smart/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def smart_search_proxy(subpath):
+    # Reverse-proxy the second service through this domain so the user has one site URL.
+    from http.cookies import SimpleCookie
+    from urllib.parse import urljoin
+    target = SMART_SEARCH_UPSTREAM + ("/" + subpath if subpath else "/")
+    if request.query_string:
+        target += "?" + request.query_string.decode("latin-1")
+    headers = {}
+    for key in ("Accept", "Content-Type", "User-Agent", "X-Requested-With"):
+        if request.headers.get(key):
+            headers[key] = request.headers[key]
+    cookie = request.cookies.get("smart_session")
+    if cookie:
+        headers["Cookie"] = "session=" + cookie
+    try:
+        upstream = requests.request(
+            request.method, target, headers=headers, data=request.get_data(),
+            timeout=(8, 90), allow_redirects=False
+        )
+    except requests.RequestException:
+        return Response("שירות החיפוש החכם אינו זמין כרגע. נסה שוב בעוד דקה.", status=502, content_type="text/plain; charset=utf-8")
+    body = upstream.content
+    content_type = upstream.headers.get("Content-Type", "application/octet-stream")
+    if "text/html" in content_type:
+        page = body.decode(upstream.encoding or "utf-8", errors="replace")
+        page = re.sub(r'(["\\'])/(?!/)([^"\\']*)', lambda m: m.group(1) + "/smart/" + m.group(2), page)
+        body = page.encode("utf-8")
+    out = Response(body, status=upstream.status_code, content_type=content_type)
+    for key in ("Cache-Control", "ETag", "Last-Modified"):
+        if upstream.headers.get(key):
+            out.headers[key] = upstream.headers[key]
+    location = upstream.headers.get("Location")
+    if location:
+        if location.startswith("/"):
+            location = "/smart" + location
+        out.headers["Location"] = location
+    raw_headers = getattr(getattr(upstream, "raw", None), "headers", None)
+    set_cookies = raw_headers.getlist("Set-Cookie") if raw_headers and hasattr(raw_headers, "getlist") else []
+    for item in set_cookies:
+        parsed = SimpleCookie()
+        try:
+            parsed.load(item)
+            for name, morsel in parsed.items():
+                if name == "session":
+                    out.set_cookie("smart_session", morsel.value, max_age=morsel["max-age"] or None,
+                                   httponly=True, secure=True, samesite="Lax", path="/smart")
+                elif name:
+                    out.set_cookie(name, morsel.value, httponly=bool(morsel["httponly"]),
+                                   secure=True, samesite="Lax", path="/smart")
+        except Exception:
+            continue
+    return out
 
 
 # היסטוריית שיחה (טקסט בלבד) ומצב עיבוד, לפי מזהה שיחה
