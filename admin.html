@@ -286,7 +286,9 @@
           ['psychologist', '3. פסיכולוגית'],
           ['yeshiva', '4. בסגנון ראש ישיבה'],
           ['yiddish', '5. משפיע באידיש'],
-          ['tools', '6. כלי AI']
+          ['tools', '6. כלי AI'],
+          ['astrology', '7. מפת האישיות'],
+          ['central', '8. עוזר AI מרכזי']
         ].map(function (item) { return h('option', { value: item[0], selected: (p.assistant_mode || 'smart') === item[0] }, item[1]); })
       );
       var toolsEnabled = h('input', { type: 'checkbox', checked: p.tools_enabled !== false });
@@ -463,12 +465,86 @@
     return h('section', null, kids);
   }
 
+  /* ---------- הודעות שמע ---------- */
+  function audioPanel() {
+    var picker = h('input', { type: 'file', accept: '.zip,.mp3,application/zip,audio/mpeg' });
+    var status = h('p', { class: 'sub' }, 'אפשר להעלות ZIP עם הודעות המערכת או קובץ MP3 בודד.');
+    var rows = h('div', null);
+    function loadAudio() {
+      rows.replaceChildren(h('p', { class: 'sub' }, 'טוען קובצי שמע...'));
+      api('GET', 'audio').then(function (data) {
+        rows.replaceChildren();
+        if (!data.items || !data.items.length) {
+          rows.append(h('p', { class: 'sub' }, 'עדיין לא הועלו הודעות שמע לפרויקט הזה.'));
+          return;
+        }
+        data.items.forEach(function (item) {
+          var player = h('audio', {
+            controls: true, preload: 'none',
+            src: '/admin/api/audio/' + encodeURIComponent(item.filename),
+            style: 'display:block;width:100%;max-width:420px;margin-top:8px'
+          });
+          var del = h('button', { class: 'danger', type: 'button', onclick: function () {
+            if (!confirm('למחוק את קובץ השמע ' + item.filename + '?')) return;
+            api('DELETE', 'audio/' + encodeURIComponent(item.filename)).then(loadAudio).catch(function (e) { status.textContent = e.message; });
+          } }, 'מחיקה');
+          rows.append(h('article', { class: 'line' },
+            h('div', null,
+              h('strong', null, item.catalog_label || item.filename),
+              h('div', { class: 'sub' }, item.filename + ' · ' + (item.size_bytes / 1024).toFixed(1) + ' KB · ' + new Date(item.created_at).toLocaleString('he-IL')),
+              player),
+            del));
+        });
+      }).catch(function (e) { rows.replaceChildren(h('p', { class: 'note bad' }, e.message)); });
+    }
+    function upload() {
+      var file = picker.files && picker.files[0];
+      if (!file) { status.textContent = 'בחר קובץ ZIP או MP3.'; return; }
+      if (file.size > 25 * 1024 * 1024) { status.textContent = 'הקובץ גדול מ־25MB.'; return; }
+      var data = new FormData(); data.append('file', file);
+      status.textContent = 'מעלה ושומר במסד הנתונים...';
+      fetch('/admin/api/audio', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'admin' }, body: data
+      }).then(function (r) {
+        return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'ההעלאה נכשלה'); return j; });
+      }).then(function (j) {
+        status.textContent = 'הועלו ' + j.uploaded + ' קובצי שמע. קובץ קיים באותו שם הוחלף.';
+        picker.value = ''; loadAudio();
+      }).catch(function (e) { status.textContent = e.message; });
+    }
+    var section = h('section', null,
+      h('h2', null, 'הודעות שמע'),
+      h('p', { class: 'sub' }, 'העלה קובצי MP3 או ZIP של הודעות המערכת. הקבצים נשמרים במסד הנתונים ומופרדים בין הפרויקטים.'),
+      h('label', { class: 'f' }, 'בחירת קובץ ZIP או MP3'), picker,
+      h('div', { class: 'bar' }, h('button', { type: 'button', onclick: upload }, 'העלאת הודעות שמע')),
+      status, rows);
+    loadAudio();
+    return section;
+  }
+
   /* ---------- ארכיון תמלולים ---------- */
   function transcriptsPanel() {
     var phone = h('input', { type: 'text', placeholder: 'מספר טלפון', inputmode: 'numeric' });
     var name = h('input', { type: 'text', placeholder: 'שם מתקשר' });
     var from = h('input', { type: 'date', 'aria-label': 'מתאריך' });
     var to = h('input', { type: 'date', 'aria-label': 'עד תאריך' });
+    var mode = h('select', null, [
+      ['', 'כל סוגי העוזרים'],
+      ['central', 'העוזר המרכזי'],
+      ['smart', 'הבינה החכמה'],
+      ['edgy', 'הבינה הישירה'],
+      ['psychologist', 'שיחה והקשבה'],
+      ['yeshiva', 'בינת הישיבה'],
+      ['yiddish', 'ביידיש'],
+      ['tools', 'כלי AI'],
+      ['astrology', 'מפת האישיות']
+    ].map(function (item) { return h('option', { value: item[0] }, item[1]); }));
+    var modeLabels = {
+      central: 'העוזר המרכזי', smart: 'הבינה החכמה', edgy: 'הבינה הישירה',
+      psychologist: 'שיחה והקשבה', yeshiva: 'בינת הישיבה', yiddish: 'ביידיש',
+      tools: 'כלי AI', astrology: 'מפת האישיות'
+    };
     var results = h('div', { class: 'sub' }, 'הזן מסנן ולחץ על חיפוש כדי להציג תמלולים.');
     var search = function () {
       results.replaceChildren(h('p', { class: 'sub' }, 'מחפש...'));
@@ -477,12 +553,14 @@
       if (name.value.trim()) q.set('name', name.value.trim());
       if (from.value) q.set('from', from.value);
       if (to.value) q.set('to', to.value);
+      if (mode.value) q.set('assistant_mode', mode.value);
       q.set('limit', '1000');
       api('GET', 'transcripts?' + q.toString()).then(function (data) {
         results.replaceChildren();
         if (!data.items.length) { results.append(h('p', { class: 'sub' }, 'לא נמצאו תמלולים מתאימים.')); return; }
         data.items.forEach(function (item) {
           var date = new Date(item.created_at).toLocaleString('he-IL');
+          var modeLabel = modeLabels[item.assistant_mode] || item.assistant_mode || 'לא ידוע';
           results.append(h('article', { class: 'line' },
             h('span', { class: 'lamp ok', 'aria-hidden': 'true' }),
             h('div', null,
@@ -490,6 +568,7 @@
                 h('strong', null, item.name || 'ללא שם'),
                 h('span', { class: 'num' }, item.phone),
                 h('span', { class: 'sub' }, date)),
+              h('div', { class: 'sub' }, 'סוג עוזר: ' + modeLabel),
               h('p', { style: 'margin-top:8px; white-space:pre-wrap' }, 'המתקשר: ' + item.heard),
               h('p', { style: 'margin-top:6px; white-space:pre-wrap' }, 'העוזר: ' + item.answer)
             )));
@@ -500,10 +579,11 @@
     };
     return h('section', null,
       h('h2', null, 'ארכיון תמלולים'),
-      h('p', { class: 'sub' }, 'חיפוש לפי מספר, שם וטווח תאריכים. התוצאות מוצגות רק למנהל המחובר.'),
+      h('p', { class: 'sub' }, 'חיפוש לפי מספר, שם, סוג עוזר וטווח תאריכים. התוצאות מוצגות רק למנהל המחובר.'),
       h('div', { class: 'add' },
         h('div', null, h('label', { class: 'sub' }, 'מספר טלפון'), phone),
         h('div', null, h('label', { class: 'sub' }, 'שם'), name),
+        h('div', null, h('label', { class: 'sub' }, 'סוג עוזר'), mode),
         h('div', null, h('label', { class: 'sub' }, 'מתאריך'), from),
         h('div', null, h('label', { class: 'sub' }, 'עד תאריך'), to),
         h('button', { onclick: search }, 'חיפוש')),
@@ -588,7 +668,7 @@
     return box;
   }
 
-  function render() { app.replaceChildren(header(), notificationsPanel(), callersPanel(), keyPoolPanel(), databasePanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
+  function render() { app.replaceChildren(header(), notificationsPanel(), callersPanel(), keyPoolPanel(), databasePanel(), audioPanel(), settingsPanel(), transcriptsPanel(), eventsPanel()); }
   function load() {
     return api('GET', 'state').then(function (j) { S = j; render(); }).catch(function (e) { if (e.message !== 'auth') say(e.message, true); });
   }
