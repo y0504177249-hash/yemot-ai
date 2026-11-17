@@ -9,6 +9,7 @@ import time
 import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
 import requests
@@ -107,7 +108,7 @@ def _iso(value):
         return ""
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return dt.astimezone(timezone(timedelta(hours=2))).strftime("%H:%M")
+        return dt.astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%H:%M")
     except Exception:
         return ""
 
@@ -239,7 +240,7 @@ def compute_transitous_route(map_request):
         instructions = [x for x in instructions if x]
         if not instructions:
             return "שירות המסלולים לא החזיר הוראות מפורטות למסלול."
-        departure = _iso(journey.get("startTime")) or requested.astimezone().strftime("%H:%M")
+        departure = _iso(journey.get("startTime")) or requested.astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%H:%M")
         arrival = _iso(journey.get("endTime"))
         total = _duration(journey.get("duration"))
         mode_label = "תחבורה ציבורית" if mode == "TRANSIT" else "הליכה ברגל"
