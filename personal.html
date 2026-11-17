@@ -1,11 +1,118 @@
 <!doctype html>
-<html lang="he" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>האזור האישי</title>
-<style>body{font:16px system-ui;background:#edf0ec;color:#16222e;margin:0;padding:24px}main{max-width:700px;margin:auto}section{background:white;border:1px solid #ccd4ce;border-radius:12px;padding:20px;margin:16px 0}input,button{font:inherit;padding:11px;border-radius:8px;border:1px solid #aab5ad}input{display:block;width:100%;box-sizing:border-box;margin:8px 0 14px}button{background:#1d4e89;color:white;cursor:pointer}article{border-top:1px solid #ddd;padding:14px 0;white-space:pre-wrap}.muted{color:#566660}</style>
-<main id="app"><section><h1>כניסה לאזור האישי</h1><label>מספר טלפון<input id="phone" inputmode="tel" autocomplete="tel"></label><label>קוד אישי<input id="pin" type="password" inputmode="numeric" autocomplete="current-password"></label><button id="login">כניסה</button><p id="msg" role="status"></p></section></main>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>האזור האישי</title>
+<style>
+body{font:16px system-ui;background:#edf0ec;color:#16222e;margin:0;padding:24px}
+main{max-width:700px;margin:auto}section{background:white;border:1px solid #ccd4ce;border-radius:12px;padding:20px;margin:16px 0}
+input,button{font:inherit;padding:11px;border-radius:8px;border:1px solid #aab5ad}
+input[type=text],input[type=password]{display:block;width:100%;box-sizing:border-box;margin:8px 0 14px}
+button{background:#1d4e89;color:white;cursor:pointer;border:0}button.secondary{background:white;color:#16222e;border:1px solid #aab5ad}
+article{border-top:1px solid #ddd;padding:14px 0;white-space:pre-wrap}.muted{color:#566660}
+label.choice{display:flex;align-items:center;gap:9px;margin:9px 0}label.choice input{width:18px;height:18px}
+.note{white-space:pre-wrap;min-height:22px}.error{color:#a3261b}.actions{display:flex;gap:8px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<main id="app">
+<section><h1>כניסה לאזור האישי</h1>
+<label>מספר טלפון<input id="phone" type="text" inputmode="tel" autocomplete="tel"></label>
+<label>סיסמה<input id="password" type="password" autocomplete="current-password" placeholder="הסיסמה שהגדרת"></label>
+<p class="muted">בהרשמה ראשונה, אם עדיין לא הגדרת סיסמה, הזן את הקוד האישי שקיבלת.</p>
+<label>קוד אישי ראשוני<input id="pin" type="password" inputmode="numeric" autocomplete="one-time-code" placeholder="רק בהרשמה הראשונה"></label>
+<button id="login">כניסה</button><p id="msg" class="note" role="status"></p></section>
+</main>
 <script>
-const app=document.getElementById('app'),msg=document.getElementById('msg');
-async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json','X-Requested-With':'personal',...(opts.headers||{})}});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'שגיאה');return j}
-async function load(){try{const d=await api('/personal/api/profile');const p=d.profile;app.replaceChildren();const box=document.createElement('section');const title=document.createElement('h1');title.textContent='האזור האישי – '+(p.name||p.phone);box.append(title);const details=document.createElement('p');details.className='muted';details.textContent='טלפון: '+p.phone+' · סגנון העוזר: '+p.assistant_mode+(p.assigned_address?' · כתובת: '+p.assigned_address:'');box.append(details);const out=document.createElement('button');out.textContent='יציאה';out.onclick=async()=>{await api('/personal/logout',{method:'POST'});location.reload()};box.append(out);app.append(box);const change=document.createElement('section');const ch=document.createElement('h2');ch.textContent='שינוי קוד אישי';change.append(ch);const oldPin=document.createElement('input');oldPin.type='password';oldPin.inputMode='numeric';oldPin.placeholder='הקוד הנוכחי';oldPin.autocomplete='current-password';const newPin=document.createElement('input');newPin.type='password';newPin.inputMode='numeric';newPin.placeholder='קוד חדש – 6 עד 12 ספרות';newPin.autocomplete='new-password';const savePin=document.createElement('button');savePin.textContent='עדכון קוד';const pinMsg=document.createElement('p');savePin.onclick=async()=>{try{await api('/personal/api/pin',{method:'POST',body:JSON.stringify({old_pin:oldPin.value,new_pin:newPin.value})});oldPin.value='';newPin.value='';pinMsg.textContent='הקוד האישי עודכן';}catch(e){pinMsg.textContent=e.message}};change.append(oldPin,newPin,savePin,pinMsg);app.append(change);if(p.history_enabled){const hist=document.createElement('section');const h=document.createElement('h2');h.textContent='היסטוריית שיחות';hist.append(h);(d.transcripts||[]).forEach(t=>{const a=document.createElement('article');const labels={central:'העוזר המרכזי',smart:'הבינה החכמה',edgy:'הבינה הישירה',psychologist:'שיחה והקשבה',yeshiva:'בינת הישיבה',yiddish:'ביידיש',tools:'כלי AI',astrology:'מפת האישיות'};a.textContent=new Date(t.created_at).toLocaleString('he-IL')+'\nסוג עוזר: '+(labels[t.assistant_mode]||t.assistant_mode||'לא ידוע')+'\nהמשתמש: '+t.heard+'\nהעוזר: '+t.answer;hist.append(a)});if(!d.transcripts.length)hist.append('אין עדיין שיחות');app.append(hist)}}catch(e){msg.textContent=e.message}}
-document.getElementById('login').onclick=async()=>{try{await api('/personal/login',{method:'POST',body:JSON.stringify({phone:document.getElementById('phone').value,pin:document.getElementById('pin').value})});await load()}catch(e){msg.textContent=e.message}};
+const app=document.getElementById('app');
+const msg=document.getElementById('msg');
+async function api(url,opts={}) {
+ const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json','X-Requested-With':'personal',...(opts.headers||{})}});
+ const j=await r.json().catch(()=>({}));
+ if(!r.ok) throw Error(j.error||'אירעה שגיאה');
+ return j;
+}
+function el(tag,attrs={},text='') {
+ const n=document.createElement(tag);
+ Object.entries(attrs).forEach(([k,v])=>{if(k==='class')n.className=v;else if(k==='type')n.type=v;else n.setAttribute(k,v)});
+ if(text)n.textContent=text;
+ return n;
+}
+function serviceChoices(selected) {
+ const wrap=el('div');
+ const items=[
+  ['yemot-ai-1','מערכת הטלפון yemot-ai-1'],
+  ['yemot-smart-search','מערכת הטלפון yemot-smart-search'],
+  ['website','האתר והאזור האישי']
+ ];
+ items.forEach(([value,label])=>{
+  const l=el('label',{class:'choice'});
+  const c=el('input',{type:'checkbox'});c.value=value;c.checked=selected.includes(value);
+  l.append(c,document.createTextNode(label));wrap.append(l);
+ });
+ return wrap;
+}
+async function load() {
+ try {
+  const d=await api('/personal/api/profile'),p=d.profile;
+  app.replaceChildren();
+  const box=el('section');
+  box.append(el('h1',{},'האזור האישי – '+(p.name||p.phone)));
+  box.append(el('p',{class:'muted'},'טלפון: '+p.phone+' · סגנון העוזר: '+p.assistant_mode+(p.assigned_address?' · כתובת: '+p.assigned_address:'')));
+  const logout=el('button',{},'יציאה');
+  logout.onclick=async()=>{await api('/personal/logout',{method:'POST'});location.reload()};
+  box.append(logout);app.append(box);
+
+  const security=el('section');
+  security.append(el('h2',{},p.has_password?'שינוי סיסמה והרשאות':'הגדרת סיסמה ראשונה'));
+  security.append(el('p',{class:'muted'},p.has_password?'אפשר לעדכן את הסיסמה ולבחור באילו שירותים היא תשמש.':'ההרשמה הראשונית הושלמה. בחר סיסמה אחת לשירותים הרצויים. הסיסמה תישמר בצורה מאובטחת ולא כטקסט גלוי.'));
+  let oldPassword=null;
+  if(p.has_password){oldPassword=el('input',{type:'password',autocomplete:'current-password',placeholder:'הסיסמה הנוכחית'});security.append(el('label',{},'סיסמה נוכחית'),oldPassword);}
+  const newPassword=el('input',{type:'password',autocomplete:'new-password',placeholder:'סיסמה חדשה – לפחות 10 תווים'});
+  const confirm=el('input',{type:'password',autocomplete:'new-password',placeholder:'אימות הסיסמה החדשה'});
+  security.append(el('label',{},'סיסמה חדשה'),newPassword,el('label',{},'אימות סיסמה'),confirm);
+  security.append(el('h3',{},'באילו שירותים להשתמש בסיסמה?'));
+  const choices=serviceChoices(p.has_password?(p.password_services||[]):['yemot-ai-1','yemot-smart-search','website']);
+  security.append(choices);
+  security.append(el('p',{class:'muted'},'אם תבחר שלא לכלול את האתר, לא תוכל להיכנס לאזור האישי באמצעות הסיסמה לאחר יציאה.'));
+  const status=el('p',{class:'note','role':'status'});
+  const save=el('button',{},p.has_password?'שמירת שינויים':'הגדרת הסיסמה');
+  save.onclick=async()=>{
+   try{
+    if(newPassword.value!==confirm.value)throw Error('הסיסמאות אינן זהות');
+    const services=Array.from(choices.querySelectorAll('input:checked')).map(x=>x.value);
+    if(!services.length)throw Error('יש לבחור לפחות שירות אחד');
+    await api('/personal/api/password',{method:'POST',body:JSON.stringify({old_password:oldPassword?oldPassword.value:'',new_password:newPassword.value,services})});
+    status.className='note';status.textContent='הסיסמה וההרשאות נשמרו בהצלחה.';
+    newPassword.value='';confirm.value='';if(oldPassword)oldPassword.value='';
+    await load();
+   }catch(e){status.className='note error';status.textContent=e.message;}
+  };
+  security.append(save,status);app.append(security);
+
+  if(p.history_enabled){
+   const hist=el('section');hist.append(el('h2',{},'היסטוריית שיחות'));
+   const labels={central:'העוזר המרכזי',smart:'הבינה החכמה',edgy:'הבינה הישירה',psychologist:'שיחה והקשבה',yeshiva:'בינת הישיבה',yiddish:'ביידיש',tools:'כלי AI',astrology:'מפת האישיות'};
+   (d.transcripts||[]).forEach(t=>{
+    const a=el('article');
+    a.textContent=new Date(t.created_at).toLocaleString('he-IL')+'\nסוג עוזר: '+(labels[t.assistant_mode]||t.assistant_mode||'לא ידוע')+'\nהמשתמש: '+t.heard+'\nהעוזר: '+t.answer;
+    hist.append(a);
+   });
+   if(!(d.transcripts||[]).length)hist.append(document.createTextNode('אין עדיין שיחות'));
+   app.append(hist);
+  }
+ }catch(e){msg.textContent=e.message;}
+}
+document.getElementById('login').onclick=async()=>{
+ try{
+  const phone=document.getElementById('phone').value;
+  const password=document.getElementById('password').value;
+  const pin=document.getElementById('pin').value;
+  if(!password&&!pin)throw Error('יש להזין סיסמה או קוד אישי ראשוני');
+  await api('/personal/login',{method:'POST',body:JSON.stringify({phone,password,pin})});
+  await load();
+ }catch(e){msg.className='note error';msg.textContent=e.message;}
+};
 fetch('/personal/api/profile').then(r=>{if(r.ok)load()});
-</script></main></html>
+</script>
+</body></html>
